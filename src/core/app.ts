@@ -1,4 +1,4 @@
-// 运行环境注入给业务代码的全部依赖。Worker 和 Node 各组装一份。
+// 注入给业务代码的全部依赖。程序里由 runtime/node.ts 组装，测试里由 test/harness.ts 组装。
 import type { Db } from "./db.ts";
 import type { Settings } from "./settings.ts";
 import type { Telegram } from "./telegram.ts";
@@ -13,7 +13,7 @@ export interface App {
   now(): number;
   /** 当前毫秒，只用于媒体组这类亚秒级判断 */
   nowMs(): number;
-  /** 稍后执行。Worker 用 waitUntil，Node 用定时器。 */
+  /** 稍后执行，比如媒体组攒齐后再发。 */
   defer(task: () => Promise<void>, delayMs: number): void;
   log(level: "info" | "warn" | "error", message: string, detail?: unknown): void;
 }

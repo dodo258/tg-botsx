@@ -145,18 +145,11 @@ async function statsText(app: App): Promise<string> {
   return `<b>今天</b>\n${line(todayRow)}\n\n<b>近 7 天</b>\n${line(weekRow)}\n\n<b>总计</b>\n联系人 ${num(totals?.total)} · 有未读 ${num(totals?.unread)} · 已屏蔽 ${num(totals?.blocked)}`;
 }
 
-async function statusText(app: App, runtime: string): Promise<string> {
-  const lines = [`<b>运行状态</b>`, `版本 ${VERSION} · 数据库结构 v${SCHEMA_VERSION} · ${runtime}`, `消息收在：${deskModeLabel(app.settings)}`];
+async function statusText(app: App): Promise<string> {
+  const lines = [`<b>运行状态</b>`, `版本 ${VERSION} · 数据库结构 v${SCHEMA_VERSION}`, `消息收在：${deskModeLabel(app.settings)}`];
   if (app.settings.floodUntil > app.now()) lines.push(`防轰炸中，到 ${formatTime(app.settings.floodUntil, app.settings.timezone)}`);
   const failed = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE status = 'failed' AND direction = 'in'").first<{ n: unknown }>();
   lines.push(`待补发消息：${num(failed?.n)}`);
-  const info = await app.tg.call<{ url?: string; pending_update_count?: number; last_error_date?: number; last_error_message?: string }>("getWebhookInfo");
-  if (info.url) {
-    lines.push(`Webhook 正常注册，待处理 ${info.pending_update_count ?? 0} 条`);
-    if (info.last_error_date) lines.push(`最近错误（${formatTime(info.last_error_date, app.settings.timezone)}）：${escapeHtml(info.last_error_message ?? "")}`);
-  } else {
-    lines.push("长轮询模式");
-  }
   return lines.join("\n");
 }
 
@@ -318,7 +311,7 @@ export async function sendContactCard(app: App, message: Message, contact: Conta
 }
 
 /** 处理一条命令。返回 false 表示不是我们认识的命令，由调用方决定怎么提示。 */
-export async function handleCommand(app: App, message: Message, staffId: number, name: string, args: string, runtime: string): Promise<boolean> {
+export async function handleCommand(app: App, message: Message, staffId: number, name: string, args: string): Promise<boolean> {
   const owner = isOwner(app, staffId);
   const ownerOnly = async () => {
     if (owner) return true;
@@ -467,7 +460,7 @@ export async function handleCommand(app: App, message: Message, staffId: number,
       if (await ownerOnly()) await cmdBroadcast(app, message, args);
       return true;
     case "status":
-      if (await ownerOnly()) await say(app, message, await statusText(app, runtime));
+      if (await ownerOnly()) await say(app, message, await statusText(app));
       return true;
     case "export":
       if (await ownerOnly()) await cmdExport(app, message);

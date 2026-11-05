@@ -2,15 +2,13 @@
 
 中文 Telegram 双向客服机器人。别人给机器人发消息，你在 Telegram 里回复，对方看不到你的账号。
 
-贴一个 Token、点一下链接就能用。不用查数字 ID，不用手动注册 Webhook，也不用另开一个后台：所有设置都在 Telegram 里改。
+贴一个 Token、点一下链接就能用。不用查数字 ID，不用域名，也不用另开后台：所有设置都在 Telegram 里改。
 
 ## 部署
 
 先在 Telegram 打开 [@BotFather](https://t.me/BotFather)，发 `/newbot`，按提示取名，拿到一串 Token。
 
-推荐部署到自己的服务器：不需要域名，不开端口，也不依赖 Cloudflare，数据都在你手里。同一个 Token 只能跑一份。
-
-### 服务器一条命令
+部署到自己的服务器，不需要域名，不开端口，数据都在你手里。同一个 Token 只能跑一份。
 
 用 root 运行，需要 Linux。没有 Docker 时脚本会问你要不要装。
 
@@ -34,25 +32,6 @@ tgbot uninstall       卸载，默认保留数据
 服务器连不上 Telegram（国内常见）时，在 `/opt/tg-botsx/.env` 里配代理或反代，写法见 [.env.example](.env.example)，然后 `tgbot restart`。
 
 不想用 Docker：需要 Node.js 22.18+，把仓库放到 `/opt/tg-botsx`，写好 `.env`，用 [deploy/tg-botsx.service](deploy/tg-botsx.service) 启动。运行时没有第三方依赖，不用 `npm install`。
-
-### 没有服务器：部署到 Cloudflare（可选）
-
-用 Cloudflare 的免费额度运行，需要 GitHub 和 Cloudflare 账号。
-
-**点按钮部署：**
-
-[![部署到 Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dodo258/tg-botsx)
-
-1. 点按钮，用 GitHub 和 Cloudflare 账号登录。数据库会自动创建。
-2. 页面让你填 `BOT_TOKEN` 时，贴上 Token，然后部署。
-3. 打开部署好的 Worker 地址（`https://tg-botsx.你的子域.workers.dev`）。
-4. 在页面上再贴一次 Token，点「打开 Telegram 认领」，在 Telegram 里按「开始」。
-
-**在电脑上用命令部署**（需要 Node.js 22.18+）：
-
-```bash
-git clone https://github.com/dodo258/tg-botsx && cd tg-botsx && bash deploy/cloudflare.sh
-```
 
 ## 怎么用
 
@@ -103,7 +82,7 @@ git clone https://github.com/dodo258/tg-botsx && cd tg-botsx && bash deploy/clou
 - 单人刷屏自动暂停 10 分钟。陌生人突然大量涌入时自动进入防护，已验证的联系人不受影响。
 
 **安全**
-- Webhook 带密钥校验，伪造请求直接拒绝。
+- 不开任何端口，机器人只往外连 Telegram，容器也不给多余权限。
 - 只有主人能改设置、群发、导出。其他群里的消息一律不碰。
 - 不收集 IP 和设备信息。机器人只看得到 Telegram 给的名字和用户名。
 
@@ -116,15 +95,13 @@ git clone https://github.com/dodo258/tg-botsx && cd tg-botsx && bash deploy/clou
 
 ## 数据和隐私
 
-你部署的机器人，数据就在你自己的 Cloudflare 账号或服务器里。聊天内容默认保留 180 天后自动抹掉（`/settings` → 数据 里可改），联系人和回复关系保留，老消息依然能回复。
+你部署的机器人，数据就在你自己的服务器里。聊天内容默认保留 180 天后自动抹掉（`/settings` → 数据 里可改），联系人和回复关系保留，老消息依然能回复。
 
 如果你公开使用这个机器人，你就是这些数据的控制者，请按当地法律告知用户。
 
 ## 费用
 
-服务器版除了服务器本身没有别的费用，机器人很省资源，最便宜的 VPS 就够。
-
-部署到 Cloudflare 的话，免费版额度（[官方说明](https://developers.cloudflare.com/workers/platform/limits/)）：每天 10 万次请求，D1 每天写 10 万行、读 500 万行。索引也算写入行数，一条普通消息粗略估算写 20 行左右，也就是每天几千条消息内免费。这个数字没有在真实账号上实测过，量大的话看 Cloudflare 控制台的用量。
+只有服务器本身的费用。机器人很省资源，最便宜的 VPS 就够。
 
 ## 开发
 
@@ -132,7 +109,7 @@ git clone https://github.com/dodo258/tg-botsx && cd tg-botsx && bash deploy/clou
 npm ci
 npm run check    # 类型检查
 npm test         # 业务场景测试（真 SQLite + 假 Telegram）
-npm run e2e      # 真实 Worker 和 Node 进程对假 Telegram 跑一遍
+npm run e2e      # 真实进程对假 Telegram 跑一遍
 ```
 
 结构和约定见 [AGENTS.md](AGENTS.md)，同类调研见 [docs/research](docs/research/2026-11-06-tg-relay-bots.md)。

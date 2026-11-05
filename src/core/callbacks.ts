@@ -338,7 +338,7 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
     return await answer();
   }
 
-  // 只认主人私聊和绑定的话题群里的按钮。Webhook 已校验来源，这里防的是别的聊天里残留的旧按钮。
+  // 只认主人私聊和绑定的话题群里的按钮。防的是别的聊天里残留的旧按钮。
   const fromOwnerDm = message.chat.id === app.settings.ownerId && isOwner(app, query.from.id);
   const fromGroup = app.settings.deskMode === "group" && message.chat.id === app.settings.groupId;
   if (!fromOwnerDm && !fromGroup) return await answer();

@@ -6,7 +6,6 @@ export interface FakeServer {
   url: string;
   calls: { method: string; body: Record<string, unknown> }[];
   queue: unknown[];
-  webhook: { url: string; secret: string };
   named(method: string): Record<string, unknown>[];
   close(): Promise<void>;
 }
@@ -14,7 +13,6 @@ export interface FakeServer {
 export async function startFakeTelegram(token: string, listen: { host: string; port: number; publicHost?: string } = { host: "127.0.0.1", port: 0 }): Promise<FakeServer> {
   const calls: FakeServer["calls"] = [];
   const queue: unknown[] = [];
-  const webhook = { url: "", secret: "" };
   let nextId = 9000;
   const server: Server = createServer((req, res) => {
     let raw = "";
@@ -43,12 +41,6 @@ export async function startFakeTelegram(token: string, listen: { host: string; p
           // 真实服务器会挂起直到有更新；这里短暂等待，避免空转
           return setTimeout(() => ok(updates), updates.length ? 0 : 150);
         }
-        case "setWebhook":
-          webhook.url = String(body.url);
-          webhook.secret = String(body.secret_token);
-          return ok(true);
-        case "getWebhookInfo":
-          return ok({ url: webhook.url, pending_update_count: 0 });
         case "sendMessage":
         case "copyMessage":
         case "forwardMessage":
@@ -70,7 +62,6 @@ export async function startFakeTelegram(token: string, listen: { host: string; p
     url: `http://${listen.publicHost ?? listen.host}:${address.port}`,
     calls,
     queue,
-    webhook,
     named: (method) => calls.filter((call) => call.method === method).map((call) => call.body),
     close: () =>
       new Promise((resolve) => {

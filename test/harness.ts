@@ -80,7 +80,6 @@ export class FakeTelegram implements Telegram {
     if (method === "createForumTopic") return { message_thread_id: this.nextId++, name: params.name };
     if (method === "copyMessages" && Array.isArray(params.message_ids)) return params.message_ids.map(() => ({ message_id: this.nextId++ }));
     if (method === "getMe") return { id: 42, username: "demo_bot", has_topics_enabled: false };
-    if (method === "getWebhookInfo") return {};
     if (["sendMessage", "copyMessage", "forwardMessage", "sendDocument"].includes(method)) return { message_id: this.nextId++ };
     return true;
   }
@@ -156,7 +155,7 @@ export async function makeHarness(options: { owner?: boolean; verify?: boolean }
   // 每条更新都重新读配置，和真实运行环境一致
   const send = async (update: Partial<Update>) => {
     app.settings = await loadSettings(db);
-    await handleUpdate(app, { update_id: updateId++, ...update } as Update, "测试");
+    await handleUpdate(app, { update_id: updateId++, ...update } as Update);
   };
   const user = (id: number) => ({ id, is_bot: false, first_name: `用户${id}`, username: `u${id}` });
 

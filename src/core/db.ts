@@ -1,4 +1,4 @@
-// 数据库接口取 D1 和 node:sqlite 的公共子集。业务代码只认这个接口，两个运行环境共用一份 SQL。
+// 数据库接口。业务代码只认这个接口，不直接依赖 node:sqlite。
 
 export type Row = Record<string, unknown>;
 
@@ -14,7 +14,7 @@ export type SqlValue = string | number | null;
 
 export interface Db {
   prepare(sql: string): Statement;
-  /** 一次事务里执行多条语句。D1 免费版把一次 batch 算一次查询，能合并就合并。 */
+  /** 一次事务里执行多条语句。 */
   batch(statements: Statement[]): Promise<void>;
   /** 执行含多条语句的 SQL，只用于建表迁移。 */
   execScript(sql: string): Promise<void>;

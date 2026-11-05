@@ -152,7 +152,7 @@ const MIGRATIONS: string[] = [
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
-/** 建表或补迁移。同一个 Worker 实例只查一次，不给每条消息增加查询。 */
+/** 建表或补迁移。启动时跑一次。 */
 export async function migrate(db: Db): Promise<void> {
   await db.execScript("CREATE TABLE IF NOT EXISTS schema_meta(id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)");
   const row = await db.prepare("SELECT version FROM schema_meta WHERE id = 1").first<{ version: unknown }>();

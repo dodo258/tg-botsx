@@ -37,14 +37,11 @@ export interface Settings {
   retentionDays: number;
   /** 认领码（一次性），认领成功或过期后清空 */
   botUsername: string;
-  /** Worker 版注册的 Webhook 地址，定时任务用它自检 */
-  webhookUrl: string;
   claimCode: string;
   claimExpiresAt: number;
   /** 私聊模式下上一张会话卡片属于谁，换人时要重新发卡片 */
   lastCardUser: number;
   lastMaintenanceDay: string;
-  lastWebhookAlertAt: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -73,12 +70,10 @@ export const DEFAULT_SETTINGS: Settings = {
   floodCountFrom: 0,
   retentionDays: 180,
   botUsername: "",
-  webhookUrl: "",
   claimCode: "",
   claimExpiresAt: 0,
   lastCardUser: 0,
   lastMaintenanceDay: "",
-  lastWebhookAlertAt: 0,
 };
 
 type Key = keyof Settings;

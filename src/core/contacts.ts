@@ -1,4 +1,4 @@
-// 联系人表的读写。一条入站消息尽量只碰一次这张表，省 D1 的查询和写入额度。
+// 联系人表的读写。
 import type { User } from "@grammyjs/types";
 import type { App } from "./app.ts";
 import type { Row } from "./db.ts";
@@ -118,7 +118,7 @@ export function identityHtml(contact: Contact): string {
   return `<a href="tg://user?id=${contact.userId}">${name}</a>${handle} · <code>${contact.userId}</code>`;
 }
 
-/** 按时区格式化。Worker 和 Node 都带完整的 Intl。 */
+/** 按时区格式化。 */
 export function formatTime(seconds: number, timezone: string): string {
   const parts = new Intl.DateTimeFormat("zh-CN", {
     timeZone: timezone,

@@ -1,4 +1,4 @@
-// 服务器版入口：长轮询，不需要公网地址和域名。
+// 程序入口：长轮询，不需要公网地址和域名。
 //   node src/runtime/node.ts          运行
 //   node src/runtime/node.ts claim    生成认领链接
 //   node src/runtime/node.ts backup 目标文件   在线备份数据库
@@ -115,7 +115,7 @@ process.on("SIGINT", stop);
 const startup = await buildApp();
 let bot: { username: string };
 try {
-  // 以前部署过 Worker 版的话要先删 Webhook，否则长轮询会报 409
+  // 这个 Token 以前被别的程序设过 Webhook 的话要先删，否则长轮询会报 409
   await tg.call("deleteWebhook", { drop_pending_updates: false });
   bot = await fetchBot(startup);
   await syncCommands(startup);
@@ -131,7 +131,7 @@ timer = setInterval(() => {
   if (ticking) return;
   ticking = true;
   buildApp()
-    .then((app) => tick(app, { minute: new Date().getUTCMinutes() }))
+    .then((app) => tick(app))
     .catch((error: unknown) => {
       console.error("定时任务失败：", error instanceof Error ? error.message : String(error));
     })
@@ -153,7 +153,7 @@ while (!stopping) {
       const update: Update = raw;
       offset = update.update_id + 1;
       handling = true;
-      await handleUpdate(await buildApp(), update, "服务器（长轮询）");
+      await handleUpdate(await buildApp(), update);
       handling = false;
     }
   } catch (error) {

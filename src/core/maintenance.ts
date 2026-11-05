@@ -1,11 +1,9 @@
-// 定时任务：群发、补发失败的消息、每日清理、Webhook 自检。
-// Worker 每分钟跑一次，Node 每 20 秒跑一次。每次只干一小批，不超出免费版每次调用 50 个子请求的限制。
+// 定时任务：群发、补发失败的消息、每日清理。每 20 秒跑一次，每次只干一小批。
 import type { App } from "./app.ts";
 import { dayKey, getContact } from "./contacts.ts";
-import { num, str } from "./db.ts";
-import { copyToDesk, noticeToOwner } from "./desk.ts";
+import { num } from "./db.ts";
+import { copyToDesk } from "./desk.ts";
 import { toMessage } from "./messages.ts";
-import { registerWebhook } from "./setup.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
 
@@ -13,7 +11,6 @@ const BROADCAST_BATCH = 25;
 const BROADCAST_LEASE = 120;
 const RETRY_BATCH = 8;
 const RETRY_WINDOW = 24 * 3600;
-const WEBHOOK_ALERT_INTERVAL = 6 * 3600;
 const CONTENT_GRACE_DAYS = 365;
 
 export async function broadcastTick(app: App): Promise<void> {
@@ -103,32 +100,10 @@ export async function dailyCleanup(app: App): Promise<void> {
   await app.db.batch(statements);
 }
 
-/** Webhook 被改掉就改回来；一直出错就提醒主人，6 小时最多一次。 */
-export async function checkWebhook(app: App, token: string): Promise<void> {
-  const expected = app.settings.webhookUrl;
-  if (!expected || app.settings.ownerId === null) return;
-  const info = await app.tg.call<{ url?: string; last_error_date?: number; last_error_message?: string; pending_update_count?: number }>("getWebhookInfo");
-  if (info.url !== expected) {
-    app.log("warn", "Webhook 地址不对，已自动改回", info.url ?? "");
-    await registerWebhook(app, token, expected);
-    return;
-  }
-  const lastError = info.last_error_date ?? 0;
-  if (app.now() - lastError > 600) return;
-  if (app.now() - app.settings.lastWebhookAlertAt < WEBHOOK_ALERT_INTERVAL) return;
-  await saveSetting(app.db, app.settings, "lastWebhookAlertAt", app.now());
-  await noticeToOwner(app, `Webhook 最近投递出错：${str(info.last_error_message)}\n待处理更新 ${info.pending_update_count ?? 0} 条。`);
-}
-
-export async function tick(app: App, options: { webhookToken?: string; minute: number }): Promise<void> {
-  const jobs: (() => Promise<void>)[] = [() => broadcastTick(app), () => retryFailed(app), () => dailyCleanup(app)];
-  if (options.webhookToken !== undefined && options.minute % 10 === 0) {
-    const token = options.webhookToken;
-    jobs.push(() => checkWebhook(app, token));
-  }
-  for (const job of jobs) {
+export async function tick(app: App): Promise<void> {
+  for (const job of [broadcastTick, retryFailed, dailyCleanup]) {
     try {
-      await job();
+      await job(app);
     } catch (error) {
       app.log("error", "定时任务出错", error instanceof Error ? error.message : String(error));
     }

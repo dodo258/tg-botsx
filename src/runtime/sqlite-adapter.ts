@@ -26,7 +26,7 @@ class SqliteStmt implements Statement {
   }
 }
 
-// node:sqlite 按列返回普通对象，字段形状由 SQL 决定，和 D1 的泛型 first<T> 一样由调用方负责。
+// node:sqlite 按列返回普通对象，字段形状由 SQL 决定，泛型 T 由调用方负责。
 function narrow<T>(row: unknown): T {
   return row as T;
 }

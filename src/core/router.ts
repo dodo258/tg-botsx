@@ -1,5 +1,4 @@
-// 把 Telegram 更新分发到对应流水线。这里的约定：任何异常都不往外抛。
-// 串行投递下，返回错误会让 Telegram 反复重发同一条，把后面的更新都堵住。
+// 把 Telegram 更新分发到对应流水线。这里的约定：任何异常都不往外抛，一条坏更新不能影响后面的消息。
 import type { ChatMemberUpdated, Message, Update } from "@grammyjs/types";
 import type { App } from "./app.ts";
 import { isOwner } from "./app.ts";
@@ -22,13 +21,13 @@ function staffIdOf(message: Message): number | null {
   return null;
 }
 
-async function staffPipeline(app: App, message: Message, staffId: number, runtime: string): Promise<void> {
+async function staffPipeline(app: App, message: Message, staffId: number): Promise<void> {
   const command = parseCommand(message.text, app.settings.botUsername);
   // 双斜杠是内部备注，不算命令
   const isSlash = message.text?.startsWith("/") === true && !message.text.startsWith("//");
   if (await handleAwaitingInput(app, message, staffId)) return;
   if (command) {
-    const known = await handleCommand(app, message, staffId, command.name, command.args, runtime);
+    const known = await handleCommand(app, message, staffId, command.name, command.args);
     if (!known) {
       await app.tg.call("sendMessage", {
         chat_id: message.chat.id,
@@ -52,7 +51,7 @@ async function staffPipeline(app: App, message: Message, staffId: number, runtim
   await handleStaffMessage(app, message, staffId);
 }
 
-async function routeMessage(app: App, message: Message, runtime: string): Promise<void> {
+async function routeMessage(app: App, message: Message): Promise<void> {
   if (isServiceMessage(message)) return;
   const chat = message.chat;
   if (chat.type === "channel") return;
@@ -71,7 +70,7 @@ async function routeMessage(app: App, message: Message, runtime: string): Promis
       return;
     }
     if (app.settings.deskMode === "group" && !isCommand) return;
-    await staffPipeline(app, message, user.id, runtime);
+    await staffPipeline(app, message, user.id);
     return;
   }
 
@@ -79,7 +78,7 @@ async function routeMessage(app: App, message: Message, runtime: string): Promis
   if (app.settings.deskMode === "group" && chat.id === app.settings.groupId) {
     const staffId = staffIdOf(message);
     if (staffId === null) return;
-    await staffPipeline(app, message, staffId, runtime);
+    await staffPipeline(app, message, staffId);
     return;
   }
   if (parseCommand(message.text, app.settings.botUsername)?.name === "bindgroup") await cmdBindGroup(app, message);
@@ -115,12 +114,12 @@ async function routeMembership(app: App, update: ChatMemberUpdated): Promise<voi
   }
 }
 
-export async function handleUpdate(app: App, update: Update, runtime: string): Promise<void> {
+export async function handleUpdate(app: App, update: Update): Promise<void> {
   try {
-    // 去重：Telegram 可能重发同一条更新
+    // 去重：进程重启后 Telegram 可能重发还没确认的更新
     const fresh = await app.db.prepare("INSERT OR IGNORE INTO seen_updates(update_id, seen_at) VALUES(?, ?)").bind(update.update_id, app.now()).run();
     if (fresh === 0) return;
-    if (update.message) await routeMessage(app, update.message, runtime);
+    if (update.message) await routeMessage(app, update.message);
     else if (update.edited_message) await routeEdited(app, update.edited_message);
     else if (update.callback_query) await handleCallback(app, update.callback_query);
     else if (update.message_reaction) await handleReaction(app, update.message_reaction);

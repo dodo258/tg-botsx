@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
-import type { SqlValue } from "../src/core/db.ts";
 
 let h: Harness;
 
@@ -813,74 +812,11 @@ describe("管理功能", () => {
     expect(h.tg.last("sendDocument").chat_id).toBe(OWNER);
   });
 
-  it("Webhook 被改掉时自检会改回来", async () => {
-    const { checkWebhook } = await import("../src/core/maintenance.ts");
-    await h.set("webhookUrl", "https://x.workers.dev/telegram/webhook");
-    h.tg.responses.set("getWebhookInfo", { url: "" });
-    await checkWebhook(h.app, "123:abc");
-    expect(h.tg.last("setWebhook").url).toBe("https://x.workers.dev/telegram/webhook");
-    expect(h.tg.last("setWebhook").secret_token).toBeTruthy();
-    expect(h.tg.last("setWebhook").max_connections).toBe(1);
-  });
-
   it("一条坏更新不会抛出，后面的更新继续处理", async () => {
     h.tg.failNext("sendMessage", 500, "Internal");
     h.tg.failNext("copyMessage", 500, "Internal");
     await h.fromUser(ALICE, "hi");
     await h.fromUser(ALICE, "hi2");
     expect(h.tg.named("copyMessage").length).toBeGreaterThan(0);
-  });
-});
-
-describe("免费额度", () => {
-  // Cloudflare 免费版每次调用最多 50 个子请求，D1 查询和 Telegram 调用都算。这里把两者都数上。
-  async function countFor(run: () => Promise<unknown>): Promise<number> {
-    const { db, tg } = h.app;
-    let count = 0;
-    const originalPrepare = db.prepare.bind(db);
-    const originalBatch = db.batch.bind(db);
-    const originalCall = tg.call.bind(tg);
-    db.prepare = (sql) => {
-      const wrap = (statement: ReturnType<typeof originalPrepare>): ReturnType<typeof originalPrepare> => ({
-        bind: (...values: SqlValue[]) => wrap(statement.bind(...values)),
-        first: () => (count++, statement.first()),
-        all: () => (count++, statement.all()),
-        run: () => (count++, statement.run()),
-        raw: statement,
-      } as never);
-      return wrap(originalPrepare(sql));
-    };
-    db.batch = (statements) => {
-      count++;
-      return originalBatch(statements.map((statement) => (statement as unknown as { raw: never }).raw));
-    };
-    tg.call = (method, params) => (count++, originalCall(method, params)) as never;
-    await run();
-    db.prepare = originalPrepare;
-    db.batch = originalBatch;
-    tg.call = originalCall;
-    return count;
-  }
-
-  it("普通消息、首次建话题的消息都远低于 50 次", async () => {
-    h = await makeHarness({ verify: false });
-    const first = await countFor(() => h.fromUser(ALICE, "第一条"));
-    const next = await countFor(() => h.fromUser(ALICE, "第二条"));
-    expect(first).toBeLessThanOrEqual(20);
-    expect(next).toBeLessThanOrEqual(12);
-    await h.set("deskMode", "group");
-    await h.set("groupId", GROUP);
-    const topic = await countFor(() => h.fromUser(BOB, "第一条"));
-    expect(topic).toBeLessThanOrEqual(20);
-  });
-
-  it("群发一批不超过 50 次", async () => {
-    h = await makeHarness({ verify: false });
-    for (let id = 3000; id < 3100; id++) await h.app.db.prepare("INSERT INTO contacts(user_id, first_seen, last_seen, msg_count) VALUES(?, 1, 1, 1)").bind(id).run();
-    await h.app.db.prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, state, created_at) VALUES(1000, 1, 1000, 'running', 1)").run();
-    const { broadcastTick } = await import("../src/core/maintenance.ts");
-    const count = await countFor(() => broadcastTick(h.app));
-    expect(count).toBeLessThanOrEqual(50);
-    expect(h.tg.named("copyMessage")).toHaveLength(25);
   });
 });
