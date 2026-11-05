@@ -1,7 +1,7 @@
 # 项目地图
 
 ## 项目是什么
-传声筒：中文 Telegram 双向客服机器人，个人或小团队自部署。贴一个 Token、点一下链接就能用，同一套代码跑在 Cloudflare Workers 和自有服务器上，消息不丢、不串、能自愈。
+传声筒：中文 Telegram 双向客服机器人，个人或小团队自部署。贴一个 Token、点一下链接就能用，主推部署到自己的服务器（也支持 Cloudflare Workers，同一套代码），消息不丢、不串、能自愈。
 
 ## 技术栈与目录
 TypeScript，运行时零依赖（`@grammyjs/types` 只用类型）。Node 直接跑 `.ts`，不需要构建。

@@ -6,24 +6,9 @@
 
 ## 部署
 
-先在 Telegram 打开 [@BotFather](https://t.me/BotFather)，发 `/newbot`，按提示取名，拿到一串 Token。然后三种方式选一种：
+先在 Telegram 打开 [@BotFather](https://t.me/BotFather)，发 `/newbot`，按提示取名，拿到一串 Token。
 
-| | 适合 | 费用 | 需要 |
-|---|---|---|---|
-| Cloudflare 按钮 | 没有服务器，不想碰命令行 | 免费额度够个人用 | GitHub、Cloudflare 账号 |
-| 服务器一条命令 | 有 VPS 或 NAS，想数据在自己手里 | 服务器费用 | 能连 Telegram 的 Linux |
-| 电脑上一条命令 | 想用 Cloudflare，习惯命令行 | 同按钮 | Node.js 22.18+ |
-
-同一个 Token 只能跑一份。
-
-### Cloudflare 按钮
-
-[![部署到 Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dodo258/tg-botsx)
-
-1. 点按钮，用 GitHub 和 Cloudflare 账号登录。数据库会自动创建。
-2. 页面让你填 `BOT_TOKEN` 时，贴上 Token，然后部署。
-3. 打开部署好的 Worker 地址（`https://tg-botsx.你的子域.workers.dev`）。
-4. 在页面上再贴一次 Token，点「打开 Telegram 认领」，在 Telegram 里按「开始」。
+推荐部署到自己的服务器：不需要域名，不开端口，也不依赖 Cloudflare，数据都在你手里。同一个 Token 只能跑一份。
 
 ### 服务器一条命令
 
@@ -50,7 +35,20 @@ tgbot uninstall       卸载，默认保留数据
 
 不想用 Docker：需要 Node.js 22.18+，把仓库放到 `/opt/tg-botsx`，写好 `.env`，用 [deploy/tg-botsx.service](deploy/tg-botsx.service) 启动。运行时没有第三方依赖，不用 `npm install`。
 
-### 电脑上一条命令
+### 没有服务器：部署到 Cloudflare（可选）
+
+用 Cloudflare 的免费额度运行，需要 GitHub 和 Cloudflare 账号。
+
+**点按钮部署：**
+
+[![部署到 Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dodo258/tg-botsx)
+
+1. 点按钮，用 GitHub 和 Cloudflare 账号登录。数据库会自动创建。
+2. 页面让你填 `BOT_TOKEN` 时，贴上 Token，然后部署。
+3. 打开部署好的 Worker 地址（`https://tg-botsx.你的子域.workers.dev`）。
+4. 在页面上再贴一次 Token，点「打开 Telegram 认领」，在 Telegram 里按「开始」。
+
+**在电脑上用命令部署**（需要 Node.js 22.18+）：
 
 ```bash
 git clone https://github.com/dodo258/tg-botsx && cd tg-botsx && bash deploy/cloudflare.sh
@@ -124,7 +122,9 @@ git clone https://github.com/dodo258/tg-botsx && cd tg-botsx && bash deploy/clou
 
 ## 费用
 
-Cloudflare 免费版额度（[官方说明](https://developers.cloudflare.com/workers/platform/limits/)）：每天 10 万次请求，D1 每天写 10 万行、读 500 万行。索引也算写入行数，一条普通消息粗略估算写 20 行左右，也就是每天几千条消息内免费。这个数字没有在真实账号上实测过，量大的话看 Cloudflare 控制台的用量。
+服务器版除了服务器本身没有别的费用，机器人很省资源，最便宜的 VPS 就够。
+
+部署到 Cloudflare 的话，免费版额度（[官方说明](https://developers.cloudflare.com/workers/platform/limits/)）：每天 10 万次请求，D1 每天写 10 万行、读 500 万行。索引也算写入行数，一条普通消息粗略估算写 20 行左右，也就是每天几千条消息内免费。这个数字没有在真实账号上实测过，量大的话看 Cloudflare 控制台的用量。
 
 ## 开发
 
