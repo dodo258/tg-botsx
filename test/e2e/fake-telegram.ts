@@ -72,6 +72,11 @@ export async function startFakeTelegram(token: string, listen: { host: string; p
     queue,
     webhook,
     named: (method) => calls.filter((call) => call.method === method).map((call) => call.body),
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise((resolve) => {
+        // 机器人的长轮询连接还挂着，不断开的话 close 永远不返回
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }

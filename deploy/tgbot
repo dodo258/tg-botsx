@@ -35,6 +35,8 @@ cmd_backup() {
   ( umask 077; compose exec -T bot cat "/data/$name" > "$target/$name" )
   compose exec -T bot rm -f "/data/$name"
   [ -s "$target/$name" ] || die "备份文件是空的，请检查机器人是否在运行。"
+  # 备份里有全部聊天内容。CI 实测只靠 umask 得到过 666，所以写完再显式收紧
+  chmod 600 "$target/$name"
   printf '已备份到 %s\n' "$target/$name"
 }
 
