@@ -112,6 +112,15 @@ check("卸载后数据卷还在", volumes.includes("tg-botsx_data"), volumes);
 const reinstall = await sudo("bash deploy/install.sh");
 check("重新安装后接着用旧数据", reinstall.code === 0 && reinstall.out.includes("已经绑定过管理员"), reinstall.out);
 
+// 公开仓库的真实路径：README 里那条 bash <(curl ...)，不用本地源码，从 GitHub 下载
+const repo = process.env.GITHUB_REPOSITORY;
+if (repo) {
+  const viaCurl = await sudo(`unset TGBOTSX_SOURCE; export TGBOTSX_REPO=${repo}; bash <(curl -fsSL https://raw.githubusercontent.com/${repo}/main/deploy/install.sh)`);
+  check("README 的 curl 安装命令可用", viaCurl.code === 0 && viaCurl.out.includes("已连上 Telegram"), viaCurl.out);
+  const updateOnline = await sudo(`unset TGBOTSX_SOURCE; export TGBOTSX_REPO=${repo}; tgbot update`);
+  check("tgbot update 能从 GitHub 下载更新", updateOnline.code === 0 && updateOnline.out.includes("已连上 Telegram"), updateOnline.out);
+}
+
 await fake.close();
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

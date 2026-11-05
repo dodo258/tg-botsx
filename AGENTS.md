@@ -21,6 +21,7 @@ TypeScript，运行时零依赖（`@grammyjs/types` 只用类型）。Node 直�
 - Docker 和安装脚本：只在 CI 跑（`test/e2e/docker-smoke.ts`，需要 root 和 Docker）
 
 ## 约定
+- 这是公开仓库（`backup` 远程指向它）。提交前确认没有密钥和私人信息；本仓库 `git config user.email` 是 noreply 地址，不要改回全局邮箱。
 - SQL 只用 D1 和 SQLite 都支持的写法；改表结构只往 `schema.ts` 追加迁移。时间一律存 Unix 秒。
 - Worker 免费版每次调用限 50 个子请求，D1 查询和 Telegram 调用都算。能合并的写入走 `db.batch`；`test/relay.test.ts` 的「免费额度」测试守这条线。
 - `handleUpdate` 不能向外抛异常，Webhook 也不能返回错误状态：串行投递下会堵死后面所有更新。送不到的消息标 `failed` 由定时任务补发。
