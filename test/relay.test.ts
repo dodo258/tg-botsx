@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
 import type { SqlValue } from "../src/core/db.ts";
 
 let h: Harness;
+
+afterEach(() => {
+  expect(h.tg.rejected).toEqual([]);
+});
 
 async function row(sql: string, ...values: (string | number)[]) {
   const result = await h.app.db.prepare(sql).bind(...values).first();
@@ -91,9 +95,40 @@ describe("私聊卡片模式", () => {
     await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
     h.tg.reset();
     await h.fromOwner("/help");
-    await h.fromOwner("/不存在");
     await h.fromOwner("/nosuch");
     expect(h.tg.named("copyMessage")).toHaveLength(0);
+  });
+
+  it("以 / 开头但不是命令的内容不转发，并且说清楚，不能默默吞掉", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    h.tg.reset();
+    for (const text of ["/etc/hosts", "/你好"]) {
+      await h.fromOwner(text);
+      expect(h.tg.named("copyMessage")).toHaveLength(0);
+      expect(h.tg.textsTo(OWNER).at(-1)).toContain("没发出去");
+    }
+  });
+
+  it("选中 B 时回复一条认不出的消息，不能发给 B", async () => {
+    await h.fromUser(BOB, "我是 B");
+    await h.press(OWNER, OWNER, 1, `select:${BOB}`);
+    h.tg.reset();
+    await h.fromOwner("这条是回给 A 的", { reply_to_message: { message_id: 424242, chat: { id: OWNER, type: "private" }, date: 0 } });
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("认不出");
+  });
+
+  it("选中 B 时回复 A 的搜索卡片，发给 A", async () => {
+    await h.fromUser(ALICE, "我是 A");
+    await h.fromUser(BOB, "我是 B");
+    await h.press(OWNER, OWNER, 1, `select:${BOB}`);
+    h.tg.reset();
+    await h.fromOwner(`/search ${ALICE}`);
+    const card = h.tg.nextId - 1;
+    h.tg.reset();
+    await h.fromOwner("回给 A", { reply_to_message: { message_id: card, chat: { id: OWNER, type: "private" }, date: 0 } });
+    expect(h.tg.last("copyMessage")).toMatchObject({ chat_id: ALICE });
   });
 
   it("相同 update_id 重复投递只处理一次", async () => {
@@ -201,6 +236,28 @@ describe("验证", () => {
   it("暂存消息有上限，防止灌库", async () => {
     for (let i = 0; i < 20; i++) await h.fromUser(ALICE, `m${i}`);
     expect((await row("SELECT COUNT(*) AS n FROM held_messages")).n).toBe(5);
+  });
+
+  it("验证前发的违禁内容，通过验证后进隔离区，不会被补发", async () => {
+    await h.set("blockedKeywords", ["博彩"]);
+    await h.fromUser(ALICE, "顶级博彩");
+    await h.fromUser(ALICE, "看这个 https://spam.example", { entities: [{ type: "url", offset: 4, length: 20 }] });
+    await h.fromUser(ALICE, "正常的话");
+    await h.passVerification(ALICE);
+    expect(h.tg.named("copyMessage")).toHaveLength(1);
+    expect((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'filtered'")).n).toBe(2);
+    expect((await row("SELECT COUNT(*) AS n FROM held_messages")).n).toBe(0);
+  });
+
+  it("审核模式下，验证前的消息也要审核，并通知主人一次", async () => {
+    await h.set("reviewNewContacts", true);
+    await h.fromUser(ALICE, "第一条");
+    await h.fromUser(ALICE, "第二条");
+    await h.passVerification(ALICE);
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    expect(h.tg.textsTo(OWNER).filter((text) => text.includes("待审核"))).toHaveLength(1);
+    await h.press(OWNER, OWNER, 1, `approve:${ALICE}`);
+    expect(h.tg.named("copyMessage")).toHaveLength(2);
   });
 
   it("免验证的联系人直接转发", async () => {
@@ -653,6 +710,65 @@ describe("管理功能", () => {
     expect((await row("SELECT COUNT(*) AS n FROM contacts WHERE unreachable_at IS NOT NULL")).n).toBe(2);
   });
 
+  it("确认后的立即执行撞上定时任务，不会重复发", async () => {
+    for (let id = 3000; id < 3010; id++) await h.app.db.prepare("INSERT INTO contacts(user_id, first_seen, last_seen, msg_count) VALUES(?, 1, 1, 1)").bind(id).run();
+    await h.app.db.prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, state, created_at) VALUES(1000, 1, 1000, 'running', 1)").run();
+    const { broadcastTick } = await import("../src/core/maintenance.ts");
+    await Promise.all([broadcastTick(h.app), broadcastTick(h.app)]);
+    const targets = h.tg.named("copyMessage").map((params) => params.chat_id);
+    expect(new Set(targets).size).toBe(targets.length);
+    expect(targets).toHaveLength(10);
+  });
+
+  it("群发进程中途崩溃，租约过期后能继续", async () => {
+    await h.app.db.prepare("INSERT INTO contacts(user_id, first_seen, last_seen, msg_count) VALUES(3000, 1, 1, 1)").run();
+    await h.app.db.prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, state, created_at, locked_until) VALUES(1000, 1, 1000, 'running', 1, ?)").bind(h.clock.now + 60).run();
+    const { broadcastTick } = await import("../src/core/maintenance.ts");
+    await broadcastTick(h.app);
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    h.clock.now += 61;
+    await broadcastTick(h.app);
+    expect(h.tg.named("copyMessage")).toHaveLength(1);
+  });
+
+  it("超长和全是特殊字符的内容，历史、隔离区、菜单、编辑通知都发得出去", async () => {
+    const nasty = "&<>\"".repeat(1500);
+    await h.set("blockedKeywords", ["&"]);
+    for (let id = 0; id < 12; id++) await h.fromUser(ALICE, nasty);
+    await h.fromOwner(`/history ${ALICE}`);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain(`${ALICE}`);
+    await h.fromOwner("/filtered");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("隔离区");
+    const failures = () => h.tg.calls.length;
+    expect(failures()).toBeGreaterThan(0);
+
+    await h.set("blockedKeywords", []);
+    await h.set("welcome", nasty.slice(0, 2000));
+    await h.set("receipt", nasty.slice(0, 2000));
+    await h.set("offlineMessage", nasty.slice(0, 2000));
+    await h.fromOwner("/settings");
+    await h.press(OWNER, OWNER, 1, "m:auto");
+    expect(String(h.tg.last("editMessageText").text)).toContain("自动回复");
+
+    await h.fromOwner(`/note ${ALICE} ${"&".repeat(500)}`);
+    await h.fromOwner(`/search ${ALICE}`);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("备注");
+
+    const id = await h.fromUser(BOB, "短消息");
+    await h.app.db.prepare("UPDATE messages SET text = ? WHERE user_msg_id = ?").bind(nasty, id).run();
+    await h.send({ edited_message: { message_id: id, date: 0, edit_date: 1, chat: { id: BOB, type: "private" }, from: { id: BOB, is_bot: false, first_name: "b" }, text: "改了" } as never });
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("原文");
+  });
+
+  it("名字和内容里的 HTML 不会让隔离区、记录打不开", async () => {
+    await h.set("blockedKeywords", ["x"]);
+    await h.send({ message: { message_id: 1, date: 0, chat: { id: ALICE, type: "private" }, from: { id: ALICE, is_bot: false, first_name: "<b>&" }, text: "x <i>" } as never });
+    await h.fromOwner("/filtered");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("&lt;i&gt;");
+    await h.fromOwner(`/history ${ALICE}`);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("&lt;i&gt;");
+  });
+
   it("群发被限流时停在原地，下一轮继续，不跳人", async () => {
     await h.app.db.prepare("INSERT INTO contacts(user_id, first_seen, last_seen, msg_count) VALUES(3000, 1, 1, 1), (3001, 1, 1, 1)").run();
     await h.app.db.prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, state, created_at) VALUES(1000, 1, 1000, 'running', 1)").run();
@@ -686,6 +802,14 @@ describe("管理功能", () => {
   it("导出生成 JSON 文件", async () => {
     await h.fromUser(ALICE, "hi");
     await h.fromOwner("/export");
+    expect(h.tg.last("sendDocument").chat_id).toBe(OWNER);
+  });
+
+  it("在群里导出也只发到主人私聊，不把聊天记录发进群", async () => {
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    await h.fromUser(ALICE, "hi");
+    await h.fromGroup(OWNER, "/export", null);
     expect(h.tg.last("sendDocument").chat_id).toBe(OWNER);
   });
 

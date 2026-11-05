@@ -18,11 +18,9 @@ if [ -z "${BOT_TOKEN:-}" ]; then
   echo
 fi
 
-output="$(npx wrangler deploy 2>&1)" || { echo "$output"; exit 1; }
-echo "$output"
+# 不能捕获输出：捕获后 wrangler 变成非交互，新账号注册 workers.dev 子域的确认会默认选否
+npx wrangler deploy
 printf '%s' "$BOT_TOKEN" | npx wrangler secret put BOT_TOKEN
-url="$(printf '%s\n' "$output" | grep -o 'https://[^ ]*workers\.dev' | head -n 1 || true)"
 
 echo
-echo "部署完成。打开下面的地址，贴一次 Token，点认领链接就好了："
-echo "  ${url:-（到 Cloudflare 控制台查看 Worker 地址）}"
+echo "部署完成。打开上面输出里的 workers.dev 地址，贴一次 Token，点认领链接就好了。"

@@ -4,7 +4,7 @@ import type { ChatMemberUpdated, Message, Update } from "@grammyjs/types";
 import type { App } from "./app.ts";
 import { isOwner } from "./app.ts";
 import { handleCallback } from "./callbacks.ts";
-import { cmdBindGroup, handleCommand, parseCommand } from "./commands.ts";
+import { cmdBindGroup, handleCommand, isOtherBotCommand, parseCommand } from "./commands.ts";
 import { noticeToOwner } from "./desk.ts";
 import { handleContactMessage } from "./inbound.ts";
 import { isServiceMessage } from "./message-info.ts";
@@ -38,8 +38,17 @@ async function staffPipeline(app: App, message: Message, staffId: number, runtim
     }
     return;
   }
-  // 群里 @别的机器人 的命令
-  if (isSlash) return;
+  if (isSlash) {
+    if (isOtherBotCommand(message.text, app.settings.botUsername)) return;
+    // /etc/hosts、/你好 这种不是命令。为防打错命令发给客户，不转发，但要说清楚
+    await app.tg.call("sendMessage", {
+      chat_id: message.chat.id,
+      ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      text: "以 / 开头的内容不会转发，这条没发出去。确实要发的话，在前面加一个字。",
+    });
+    return;
+  }
   await handleStaffMessage(app, message, staffId);
 }
 

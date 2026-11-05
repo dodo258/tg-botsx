@@ -83,3 +83,28 @@ export function escapeHtml(value: string): string {
     return "&quot;";
   });
 }
+
+/** 转义后不超过 max 个字符。必须先截后转义，转义后再截会切断实体或标签，Telegram 会拒收整条消息。 */
+export function clipHtml(value: string, max: number): string {
+  let used = 0;
+  let out = "";
+  for (const char of value) {
+    const piece = escapeHtml(char);
+    if (used + piece.length > max) return `${out}…`;
+    out += piece;
+    used += piece.length;
+  }
+  return out;
+}
+
+/** Telegram 单条消息上限 4096 字符，留点余量。放不下的行整行丢弃，不切开，保证 HTML 完整。 */
+export function fitLines(lines: readonly string[], separator: string, max = 3800): { text: string; kept: string[] } {
+  const kept: string[] = [];
+  let length = 0;
+  for (const line of lines) {
+    if (length + line.length + separator.length > max) break;
+    kept.push(line);
+    length += line.length + separator.length;
+  }
+  return { text: kept.join(separator), kept };
+}

@@ -10,6 +10,7 @@ import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
 
 const BROADCAST_BATCH = 25;
+const BROADCAST_LEASE = 120;
 const RETRY_BATCH = 8;
 const RETRY_WINDOW = 24 * 3600;
 const WEBHOOK_ALERT_INTERVAL = 6 * 3600;
@@ -19,16 +20,23 @@ export async function broadcastTick(app: App): Promise<void> {
   const job = await app.db.prepare("SELECT * FROM broadcasts WHERE state = 'running' ORDER BY id LIMIT 1").first();
   if (!job) return;
   const id = num(job.id);
+  // 租约：确认后的立即执行可能撞上定时任务，两边读到同一个游标就会重复发。抢不到就让对方干。
+  const claimed = await app.db
+    .prepare("UPDATE broadcasts SET locked_until = ? WHERE id = ? AND state = 'running' AND (locked_until IS NULL OR locked_until < ?)")
+    .bind(app.now() + BROADCAST_LEASE, id, app.now())
+    .run();
+  if (claimed === 0) return;
+  const fresh = await app.db.prepare("SELECT cursor, sent, failed FROM broadcasts WHERE id = ?").bind(id).first();
   const fromChat = num(job.from_chat_id);
   const fromMsg = num(job.from_msg_id);
-  let cursor = num(job.cursor);
+  let cursor = num(fresh?.cursor);
   const recipients = await app.db
     .prepare("SELECT user_id FROM contacts WHERE user_id > ? AND blocked_at IS NULL AND unreachable_at IS NULL AND msg_count > 0 AND user_id != ? ORDER BY user_id LIMIT ?")
     .bind(cursor, app.settings.ownerId ?? 0, BROADCAST_BATCH)
     .all<{ user_id: unknown }>();
   if (recipients.length === 0) {
-    await app.db.prepare("UPDATE broadcasts SET state = 'done', finished_at = ? WHERE id = ?").bind(app.now(), id).run();
-    await app.tg.call("sendMessage", { chat_id: num(job.report_chat_id), text: `群发完成：成功 ${num(job.sent)}，失败 ${num(job.failed)}。` });
+    await app.db.prepare("UPDATE broadcasts SET state = 'done', finished_at = ?, locked_until = NULL WHERE id = ?").bind(app.now(), id).run();
+    await app.tg.call("sendMessage", { chat_id: num(job.report_chat_id), text: `群发完成：成功 ${num(fresh?.sent)}，失败 ${num(fresh?.failed)}。` });
     return;
   }
   let sent = 0;
@@ -48,7 +56,7 @@ export async function broadcastTick(app: App): Promise<void> {
     cursor = userId;
   }
   await app.db.batch([
-    app.db.prepare("UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ? WHERE id = ?").bind(cursor, sent, failed, id),
+    app.db.prepare("UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ?, locked_until = NULL WHERE id = ?").bind(cursor, sent, failed, id),
     ...unreachable.map((userId) => app.db.prepare("UPDATE contacts SET unreachable_at = ? WHERE user_id = ?").bind(app.now(), userId)),
   ]);
 }

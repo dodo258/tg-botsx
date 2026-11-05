@@ -7,7 +7,7 @@ import { dayKey, formatTime, fullName, getContact, identityHtml, toContact } fro
 import { num, str } from "./db.ts";
 import { cardText, contactKeyboard, usesThreads } from "./desk.ts";
 import { deskModeLabel, renderMenu, setAwaiting } from "./menus.ts";
-import { escapeHtml, kindLabel } from "./message-info.ts";
+import { clipHtml, escapeHtml, fitLines, kindLabel } from "./message-info.ts";
 import { toMessage } from "./messages.ts";
 import { failureText, markUnreachable, recordOutbound, routeOf } from "./outbound.ts";
 import { fetchBot, syncCommands } from "./setup.ts";
@@ -17,6 +17,12 @@ import { retract } from "./sync.ts";
 import { TelegramError } from "./telegram.ts";
 
 export const VERSION = "0.1.0";
+
+/** 群里发给别的机器人的命令，比如 /start@other_bot。 */
+export function isOtherBotCommand(text: string | undefined, botUsername: string): boolean {
+  const target = /^\/[a-zA-Z_]+@(\w+)(?:\s|$)/.exec(text ?? "")?.[1];
+  return target !== undefined && botUsername !== "" && target.toLowerCase() !== botUsername.toLowerCase();
+}
 
 export function parseCommand(text: string | undefined, botUsername: string): { name: string; args: string } | null {
   const match = /^\/([a-zA-Z_]+)(?:@(\w+))?(?:\s+([\s\S]*))?$/.exec(text ?? "");
@@ -94,25 +100,27 @@ export async function renderHistory(app: App, userId: number, offset: number): P
     const who = row.direction === "in" ? "对方" : "我方";
     const flags = [row.retractedAt !== null ? "已撤回" : "", row.status === "filtered" ? `隔离：${row.reason ?? ""}` : "", row.status === "failed" ? "待补发" : ""].filter(Boolean).join("，");
     const body = row.text ?? (row.fileId || row.kind !== "text" ? `[${kindLabel(row.kind)}]` : "[内容已清理]");
-    return `<code>${formatTime(row.createdAt, app.settings.timezone)}</code> <b>${who}</b>${flags ? `（${escapeHtml(flags)}）` : ""}\n${escapeHtml(body.slice(0, 400))}`;
+    return `<code>${formatTime(row.createdAt, app.settings.timezone)}</code> <b>${who}</b>${flags ? `（${clipHtml(flags, 200)}）` : ""}\n${clipHtml(body, 800)}`;
   });
+  // 最新的最重要：放不下时丢最早的
+  const kept = fitLines([...lines].reverse(), "\n\n").kept.reverse().join("\n\n");
   const buttons = [];
   if (rows.length > PAGE) buttons.push({ text: "更早", callback_data: `history:${userId}:${offset + PAGE}` });
   if (offset > 0) buttons.push({ text: "更新", callback_data: `history:${userId}:${Math.max(0, offset - PAGE)}` });
-  return { text: `${title}\n\n${lines.join("\n\n")}`.slice(0, 4000), keyboard: buttons.length ? { inline_keyboard: [buttons] } : undefined };
+  return { text: `${title}\n\n${kept}`, keyboard: buttons.length ? { inline_keyboard: [buttons] } : undefined };
 }
 
 export async function renderFiltered(app: App, offset: number): Promise<{ text: string; keyboard: unknown }> {
   const rows = await app.db.prepare("SELECT * FROM messages WHERE status = 'filtered' ORDER BY id DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
   const shown = rows.slice(0, PAGE).map(toMessage);
   if (shown.length === 0) return { text: offset === 0 ? "隔离区是空的。" : "没有更多了。", keyboard: undefined };
-  const lines = shown.map((row, index) => `${index + 1}. <code>${row.userId}</code> · ${formatTime(row.createdAt, app.settings.timezone)} · ${escapeHtml(row.reason ?? "")}\n${escapeHtml((row.text ?? `[${kindLabel(row.kind)}]`).slice(0, 200))}`);
+  const lines = shown.map((row, index) => `${index + 1}. <code>${row.userId}</code> · ${formatTime(row.createdAt, app.settings.timezone)} · ${clipHtml(row.reason ?? "", 120)}\n${clipHtml(row.text ?? `[${kindLabel(row.kind)}]`, 300)}`);
   const buttons = shown.map((row, index) => [
     { text: `放行 ${index + 1}`, callback_data: `release:${row.id}` },
     { text: `屏蔽 ${index + 1}`, callback_data: `block:${row.userId}` },
   ]);
   if (rows.length > PAGE) buttons.push([{ text: "下一页", callback_data: `filtered:${offset + PAGE}` }]);
-  return { text: `<b>隔离区</b>\n\n${lines.join("\n\n")}`.slice(0, 4000), keyboard: { inline_keyboard: buttons } };
+  return { text: `<b>隔离区</b>\n\n${fitLines(lines, "\n\n").text}`, keyboard: { inline_keyboard: buttons } };
 }
 
 function formatDuration(seconds: number): string {
@@ -159,7 +167,7 @@ async function cmdQuick(app: App, message: Message, staffId: number, args: strin
       await say(app, message, "还没有快捷回复。用 /qadd 名字 内容 添加。");
       return;
     }
-    await say(app, message, `<b>快捷回复</b>（/q 名字 发送）\n\n${rows.map((row) => `<code>${escapeHtml(str(row.name))}</code>：${escapeHtml(str(row.body).slice(0, 80))}`).join("\n")}`);
+    await say(app, message, `<b>快捷回复</b>（/q 名字 发送）\n\n${fitLines(rows.map((row) => `<code>${clipHtml(str(row.name), 60)}</code>：${clipHtml(str(row.body), 80)}`), "\n").text}`);
     return;
   }
   const quick = await app.db.prepare("SELECT body FROM quick_replies WHERE name = ?").bind(args).first<{ body: unknown }>();
@@ -208,8 +216,8 @@ async function cmdRule(app: App, message: Message, args: string): Promise<void> 
     return;
   }
   const rows = await app.db.prepare("SELECT * FROM auto_rules ORDER BY id LIMIT 50").all();
-  const list = rows.map((row) => `${num(row.id)}. ${escapeHtml(str(row.keywords))} → ${escapeHtml(str(row.reply).slice(0, 60))}（命中 ${num(row.hits)}）`);
-  await say(app, message, `<b>关键词自动回复</b>\n\n${list.length ? list.join("\n") : "还没有。"}\n\n/rule add 关键词1,关键词2 | 回复内容\n/rule del 编号`);
+  const list = rows.map((row) => `${num(row.id)}. ${clipHtml(str(row.keywords), 80)} → ${clipHtml(str(row.reply), 60)}（命中 ${num(row.hits)}）`);
+  await say(app, message, `<b>关键词自动回复</b>\n\n${list.length ? fitLines(list, "\n", 3500).text : "还没有。"}\n\n/rule add 关键词1,关键词2 | 回复内容\n/rule del 编号`);
 }
 
 async function cmdBroadcast(app: App, message: Message, args: string): Promise<void> {
@@ -243,10 +251,13 @@ async function cmdExport(app: App, message: Message): Promise<void> {
   const contacts = await app.db.prepare("SELECT * FROM contacts ORDER BY user_id").all();
   const messages = await app.db.prepare("SELECT * FROM messages ORDER BY id DESC LIMIT 20000").all();
   const data = JSON.stringify({ exportedAt: app.now(), version: VERSION, contacts, messages }, null, 1);
+  // 导出含全部聊天内容，只发给主人本人，在群里发命令也不能发到群里
+  const ownerId = app.settings.ownerId;
+  if (ownerId === null) return;
   await app.tg.upload(
     "sendDocument",
     {
-      chat_id: message.chat.id,
+      chat_id: ownerId,
       caption: `联系人 ${contacts.length} 个，消息 ${messages.length} 条（最多导出最近 20000 条）。文件含聊天内容，注意保管。`,
     },
     "document",
@@ -254,6 +265,7 @@ async function cmdExport(app: App, message: Message): Promise<void> {
     `传声筒导出-${dayKey(app.now(), app.settings.timezone)}.json`,
     "application/json",
   );
+  if (message.chat.id !== ownerId) await say(app, message, "已发到你和机器人的私聊。");
 }
 
 /** 在群里绑定话题群。逐项检查并说清哪一步不对：匿名身份、没开话题、机器人没权限，是部署时最常见的三个坑。 */
@@ -293,7 +305,16 @@ export async function cmdBindGroup(app: App, message: Message): Promise<void> {
 }
 
 export async function sendContactCard(app: App, message: Message, contact: Contact): Promise<void> {
-  await say(app, message, cardText(app, contact), contactKeyboard(contact, false, usesThreads(app)));
+  const sent = await app.tg.call<{ message_id: number }>("sendMessage", {
+    chat_id: message.chat.id,
+    ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
+    text: cardText(app, contact),
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
+    reply_markup: contactKeyboard(contact, false, usesThreads(app)),
+  });
+  // 记下卡片归属，回复这张卡片才能发给对的人
+  await app.db.prepare("INSERT OR REPLACE INTO cards(chat_id, message_id, user_id, created_at) VALUES(?, ?, ?, ?)").bind(message.chat.id, sent.message_id, contact.userId, app.now()).run();
 }
 
 /** 处理一条命令。返回 false 表示不是我们认识的命令，由调用方决定怎么提示。 */

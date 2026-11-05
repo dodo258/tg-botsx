@@ -14,7 +14,16 @@ set -euo pipefail
 REPO="${TGBOTSX_REPO:-dodo258/tg-botsx}"
 BRANCH="${TGBOTSX_BRANCH:-main}"
 DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
-API_BASE="${TELEGRAM_API_BASE:-https://api.telegram.org}"
+# 从 tgbot update 调用时可能继承 umask 077，程序文件必须让容器里的 node 用户读得到
+umask 022
+
+# 环境变量优先，其次已有配置里的反代地址。国内服务器更新时靠这个连上 Telegram
+env_api_base() {
+  [ -f "$DIR/.env" ] && sed -n 's/^TELEGRAM_API_BASE=//p' "$DIR/.env" | head -n 1
+  return 0
+}
+API_BASE="${TELEGRAM_API_BASE:-$(env_api_base)}"
+API_BASE="${API_BASE:-https://api.telegram.org}"
 API_BASE="${API_BASE%/}"
 
 say() { printf '%s\n' "$*"; }
@@ -63,7 +72,6 @@ ensure_docker() {
 
 fetch_source() {
   step "准备程序文件"
-  mkdir -p "$DIR"
   local staging
   staging="$(mktemp -d)"
   if [ -n "${TGBOTSX_SOURCE:-}" ]; then
@@ -121,22 +129,23 @@ configure_token() {
     [ -n "${BOT_TOKEN:-}" ] && die "环境变量里的 BOT_TOKEN 不可用。"
     token=""
   done
-  umask 077
-  if [ -f "$env_file" ]; then
-    # 只改 Token 这一行，其他配置（代理等）保留
-    local updated
-    updated="$(mktemp)"
-    grep -v '^BOT_TOKEN=' "$env_file" > "$updated" || true
-    printf 'BOT_TOKEN=%s\n' "$token" >> "$updated"
-    cat "$updated" > "$env_file"
-    rm -f "$updated"
-  else
-    printf 'BOT_TOKEN=%s\n' "$token" > "$env_file"
-  fi
-  if [ "${TELEGRAM_API_BASE:-}" != "" ] && ! grep -q '^TELEGRAM_API_BASE=' "$env_file"; then
-    printf 'TELEGRAM_API_BASE=%s\n' "$API_BASE" >> "$env_file"
-  fi
-  chmod 600 "$env_file"
+  (
+    umask 077
+    if [ -f "$env_file" ]; then
+      # 只改 Token 这一行，其他配置（代理等）保留
+      updated="$(mktemp)"
+      grep -v '^BOT_TOKEN=' "$env_file" > "$updated" || true
+      printf 'BOT_TOKEN=%s\n' "$token" >> "$updated"
+      cat "$updated" > "$env_file"
+      rm -f "$updated"
+    else
+      printf 'BOT_TOKEN=%s\n' "$token" > "$env_file"
+    fi
+    if [ "${TELEGRAM_API_BASE:-}" != "" ] && ! grep -q '^TELEGRAM_API_BASE=' "$env_file"; then
+      printf 'TELEGRAM_API_BASE=%s\n' "$API_BASE" >> "$env_file"
+    fi
+    chmod 600 "$env_file"
+  )
 }
 
 start_bot() {
@@ -174,8 +183,10 @@ main() {
   need_root "$@"
   ensure_tools
   ensure_docker
-  fetch_source
+  mkdir -p "$DIR"
+  # 先校验 Token 再动程序文件，校验不过时现有版本不受影响
   configure_token
+  fetch_source
   start_bot
   show_claim
   step "装好了"

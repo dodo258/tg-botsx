@@ -100,6 +100,7 @@ const MIGRATIONS: string[] = [
     kind TEXT NOT NULL,
     text TEXT,
     file_id TEXT,
+    reason TEXT,
     held_at INTEGER NOT NULL,
     PRIMARY KEY(user_id, message_id)
   );
@@ -121,6 +122,7 @@ const MIGRATIONS: string[] = [
     report_chat_id INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'draft',
     cursor INTEGER NOT NULL DEFAULT 0,
+    locked_until INTEGER,
     total INTEGER NOT NULL DEFAULT 0,
     sent INTEGER NOT NULL DEFAULT 0,
     failed INTEGER NOT NULL DEFAULT 0,

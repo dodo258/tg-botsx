@@ -43,6 +43,8 @@ export async function routeOf(app: App, message: Message, staffId: number): Prom
     if (contact) return { contact, stored: null };
   }
   if (app.settings.deskMode === "group") return null;
+  // 明确引用了一条认不出的消息时不能退回「选中」：管理员以为在回 A，消息却发给选中的 B
+  if (reply && !Object.hasOwn(reply, "forum_topic_created")) return null;
   const selected = await selectedUser(app, staffId);
   if (selected === null) return null;
   const contact = await getContact(app, selected);

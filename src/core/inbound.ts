@@ -8,7 +8,7 @@ import { bumpDaily, identityHtml, touchContact } from "./contacts.ts";
 import { num } from "./db.ts";
 import { contactKeyboard, copyToDesk, noticeToOwner } from "./desk.ts";
 import { evaluate } from "./filter.ts";
-import { describe, escapeHtml } from "./message-info.ts";
+import { clipHtml, describe } from "./message-info.ts";
 import type { MessageInfo } from "./message-info.ts";
 import { findByUserMsg, insertMessage } from "./messages.ts";
 import { saveSetting } from "./settings.ts";
@@ -56,19 +56,43 @@ export async function sendChallenge(app: App, contact: Contact, prefix = "发消
 async function holdForVerification(app: App, contact: Contact, message: Message, info: MessageInfo): Promise<void> {
   const count = await app.db.prepare("SELECT COUNT(*) AS n FROM held_messages WHERE user_id = ?").bind(contact.userId).first<{ n: unknown }>();
   if (num(count?.n) >= MAX_HELD) return;
+  // 拦截判断要用原始消息（链接实体、转发来源），这些只有现在拿得到，所以先判断，结果存下来
+  const verdict = evaluate(message, app.settings, contact.msgCount < NEW_CONTACT_MESSAGES);
   await app.db
-    .prepare("INSERT OR IGNORE INTO held_messages(user_id, message_id, kind, text, file_id, held_at) VALUES(?, ?, ?, ?, ?, ?)")
-    .bind(contact.userId, message.message_id, info.kind, info.text || null, info.fileId || null, app.now())
+    .prepare("INSERT OR IGNORE INTO held_messages(user_id, message_id, kind, text, file_id, reason, held_at) VALUES(?, ?, ?, ?, ?, ?, ?)")
+    .bind(contact.userId, message.message_id, info.kind, info.text || null, info.fileId || null, verdict.action === "hold" ? verdict.reason : null, app.now())
     .run();
 }
 
-/** 验证通过后，把验证前留下的消息补发给客服台。 */
+/** 进隔离区，不转发。新联系人待审核时通知主人一次。 */
+async function quarantine(app: App, contact: Contact, userMsgId: number, info: MessageInfo, filterReason: string | null): Promise<void> {
+  const reason = filterReason ?? "新联系人待审核";
+  await app.db.batch([
+    insertMessage(app, { userId: contact.userId, direction: "in", kind: info.kind, text: info.text, fileId: info.fileId, userMsgId, deskChatId: null, deskMsgId: null, staffId: null, status: "filtered", reason }),
+    bumpDaily(app, "filtered"),
+  ]);
+  if (filterReason !== null || contact.msgCount > 0) return;
+  await noticeToOwner(app, `新联系人待审核：\n${identityHtml(contact)}\n\n${clipHtml(info.text, 300)}`, {
+    inline_keyboard: [[{ text: "放行", callback_data: `approve:${contact.userId}` }, { text: "屏蔽", callback_data: `block:${contact.userId}` }]],
+  });
+  await app.db.prepare("UPDATE contacts SET msg_count = msg_count + 1 WHERE user_id = ?").bind(contact.userId).run();
+  contact.msgCount += 1;
+}
+
+function needsReview(app: App, contact: Contact): boolean {
+  return app.settings.reviewNewContacts && contact.approvedAt === null;
+}
+
+/** 验证通过后处理验证前留下的消息：该拦的进隔离区，其余补发给客服台。 */
 export async function releaseHeld(app: App, contact: Contact): Promise<void> {
   const rows = await app.db.prepare("SELECT * FROM held_messages WHERE user_id = ? ORDER BY message_id").bind(contact.userId).all();
   await app.db.prepare("DELETE FROM held_messages WHERE user_id = ?").bind(contact.userId).run();
   for (const row of rows) {
     const info: MessageInfo = { kind: typeof row.kind === "string" ? row.kind : "other", text: typeof row.text === "string" ? row.text : "", fileId: typeof row.file_id === "string" ? row.file_id : "" };
-    await deliver(app, contact, { message_id: num(row.message_id) }, info, null);
+    const filterReason = typeof row.reason === "string" ? row.reason : null;
+    const userMsgId = num(row.message_id);
+    if (filterReason !== null || needsReview(app, contact)) await quarantine(app, contact, userMsgId, info, filterReason);
+    else await deliver(app, contact, { message_id: userMsgId }, info, null);
   }
 }
 
@@ -206,20 +230,8 @@ export async function handleContactMessage(app: App, message: Message, user: Use
 
   const isNewContact = contact.msgCount < NEW_CONTACT_MESSAGES;
   const verdict = evaluate(message, app.settings, isNewContact);
-  const needsReview = app.settings.reviewNewContacts && contact.approvedAt === null;
-  if (verdict.action === "hold" || needsReview) {
-    const reason = verdict.action === "hold" ? verdict.reason : "新联系人待审核";
-    await app.db.batch([
-      insertMessage(app, { userId: user.id, direction: "in", kind: info.kind, text: info.text, fileId: info.fileId, userMsgId: message.message_id, deskChatId: null, deskMsgId: null, staffId: null, status: "filtered", reason }),
-      bumpDaily(app, "filtered"),
-    ]);
-    if (needsReview && verdict.action === "pass" && contact.msgCount === 0) {
-      const preview = escapeHtml(info.text.slice(0, 300));
-      await noticeToOwner(app, `新联系人待审核：\n${identityHtml(contact)}\n\n${preview}`, {
-        inline_keyboard: [[{ text: "放行", callback_data: `approve:${user.id}` }, { text: "屏蔽", callback_data: `block:${user.id}` }]],
-      });
-      await app.db.prepare("UPDATE contacts SET msg_count = msg_count + 1 WHERE user_id = ?").bind(user.id).run();
-    }
+  if (verdict.action === "hold" || needsReview(app, contact)) {
+    await quarantine(app, contact, message.message_id, info, verdict.action === "hold" ? verdict.reason : null);
     return;
   }
 

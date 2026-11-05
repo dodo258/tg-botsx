@@ -77,6 +77,33 @@ fake.queue.push({ update_id: 3, message: { message_id: 3, date: 1, chat: { id: 1
 await sleep(4000);
 check("恢复后主人身份还在", fake.named("sendMessage").some((m) => String(m.text).includes("怎么回复")));
 
+// umask 077 下更新：程序文件权限错了容器里的 node 用户就读不了，机器人起不来
+const updated = await sudo("umask 077; tgbot update");
+check("tgbot update 成功，机器人重新连上", updated.code === 0 && updated.out.includes("已连上 Telegram"), updated.out);
+check("更新后程序文件别人读得到", execSync(`sudo stat -c %a ${DIR}/src`, { encoding: "utf8" }).trim() === "755");
+await sleep(3000);
+const helpCount = fake.named("sendMessage").filter((m) => String(m.text).includes("怎么回复")).length;
+fake.queue.push({ update_id: 4, message: { message_id: 4, date: 1, chat: { id: 1000, type: "private" }, from: { id: 1000, is_bot: false, first_name: "主人" }, text: "/help" } });
+await sleep(4000);
+check("更新后机器人还能正常工作", fake.named("sendMessage").filter((m) => String(m.text).includes("怎么回复")).length === helpCount + 1);
+
+// 机器人停了也要能更新，这正是最需要修复的时候
+await sudo(`cd ${DIR} && docker compose stop bot`);
+const updatedWhileDown = await sudo("tgbot update");
+check("机器人停着也能更新", updatedWhileDown.code === 0 && updatedWhileDown.out.includes("跳过这次备份"), updatedWhileDown.out);
+
+// .env 里配的反代地址，环境变量没给时也要生效
+const viaEnvFile = await new Promise<{ code: number; out: string }>((resolve, reject) => {
+  execSync(`sudo sh -c "grep -q '^TELEGRAM_API_BASE=' ${DIR}/.env"`);
+  const child = spawn("sudo", ["env", "-u", "TELEGRAM_API_BASE", "-u", "BOT_TOKEN", "TGBOTSX_YES=1", `TGBOTSX_SOURCE=${process.cwd()}`, "bash", "deploy/install.sh"], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+  child.stderr.on("data", (chunk: Buffer) => (out += chunk.toString()));
+  child.on("error", reject);
+  child.on("close", (code) => resolve({ code: code ?? 1, out }));
+});
+check("从 .env 读反代地址校验 Token", viaEnvFile.code === 0 && viaEnvFile.out.includes("Token 有效"), viaEnvFile.out);
+
 const stoppedKeep = await sudo("tgbot uninstall", "\n卸载\n");
 check("卸载（保留数据）成功", stoppedKeep.code === 0 && stoppedKeep.out.includes("数据保留"), stoppedKeep.out);
 const volumes = execSync("sudo docker volume ls --format '{{.Name}}'", { encoding: "utf8" });

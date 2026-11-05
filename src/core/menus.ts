@@ -2,7 +2,7 @@
 import type { Message } from "@grammyjs/types";
 import type { App } from "./app.ts";
 import { str } from "./db.ts";
-import { escapeHtml } from "./message-info.ts";
+import { clipHtml, escapeHtml } from "./message-info.ts";
 import type { Settings } from "./settings.ts";
 import { saveSetting } from "./settings.ts";
 
@@ -57,9 +57,9 @@ export function renderMenu(app: App, page: string): Menu {
       return {
         text:
           "<b>自动回复</b>\n\n" +
-          `<b>欢迎语</b>（/start 时发送）：\n${escapeHtml(s.welcome)}\n\n` +
-          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：\n${escapeHtml(s.receipt)}\n\n` +
-          `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${escapeHtml(s.offlineMessage)}\n\n` +
+          `<b>欢迎语</b>（/start 时发送）：\n${clipHtml(s.welcome, 900)}\n\n` +
+          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：\n${clipHtml(s.receipt, 900)}\n\n` +
+          `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${clipHtml(s.offlineMessage, 900)}\n\n` +
           "关键词自动回复用 /rule 管理。",
         keyboard: {
           inline_keyboard: [
@@ -75,7 +75,7 @@ export function renderMenu(app: App, page: string): Menu {
       return {
         text:
           "<b>防骚扰</b>\n命中规则的消息进隔离区，不会丢，用 /filtered 查看和放行。\n\n" +
-          `屏蔽关键词：${s.blockedKeywords.length ? escapeHtml(s.blockedKeywords.join("、")) : "无"}\n` +
+          `屏蔽关键词：${s.blockedKeywords.length ? clipHtml(s.blockedKeywords.join("、"), 2500) : "无"}\n` +
           `新联系人发链接进隔离：${onOff(s.blockLinksForNew)}\n` +
           `转发内容进隔离：${onOff(s.blockForwards)}\n` +
           `新联系人先审核再转发：${onOff(s.reviewNewContacts)}\n` +

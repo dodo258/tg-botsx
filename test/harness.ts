@@ -20,8 +20,31 @@ export interface Call {
   params: Params;
 }
 
+/** 和真实 Telegram 一样拒收超长和 HTML 不合法的消息，否则这类问题只有上线才暴露。 */
+export function validateText(method: string, params: Params): void {
+  const text = params.text ?? params.caption;
+  if (typeof text !== "string") return;
+  if (text.length > 4096) throw new TelegramError(method, 400, "Bad Request: message is too long", null);
+  if (params.parse_mode !== "HTML") return;
+  const allowed = new Set(["b", "i", "u", "s", "a", "code", "pre", "blockquote", "tg-spoiler"]);
+  const stack: string[] = [];
+  for (const match of text.matchAll(/<(\/?)([a-zA-Z-]*)[^>]*>|<|&(?!(?:lt|gt|amp|quot);)/g)) {
+    const whole = match[0];
+    const name = match[2] ?? "";
+    if (whole === "<" || whole === "&" || !allowed.has(name)) throw new TelegramError(method, 400, `Bad Request: can't parse entities: ${whole}`, null);
+    if (match[1] === "/") {
+      if (stack.pop() !== name) throw new TelegramError(method, 400, `Bad Request: can't parse entities: ${whole}`, null);
+    } else {
+      stack.push(name);
+    }
+  }
+  if (stack.length > 0) throw new TelegramError(method, 400, "Bad Request: can't parse entities: 标签没闭合", null);
+}
+
 export class FakeTelegram implements Telegram {
   calls: Call[] = [];
+  /** 因为超长或 HTML 不合法被拒收的调用，应该永远为空 */
+  rejected: string[] = [];
   nextId = 5000;
   /** 按方法名排队的失败，用一次消耗一次 */
   failures = new Map<string, TelegramError[]>();
@@ -37,6 +60,13 @@ export class FakeTelegram implements Telegram {
     this.calls.push({ method, params });
     const failure = this.failures.get(method)?.shift();
     if (failure) throw failure;
+    try {
+      validateText(method, params);
+    } catch (error) {
+      // 业务代码会吞掉发送错误，只记日志，所以单独记下来，由每个测试结束时统一断言
+      this.rejected.push(`${method}: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
     return this.respond(method, params) as T;
   }
 

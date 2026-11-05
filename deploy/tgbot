@@ -17,7 +17,12 @@ cmd_status() {
   compose logs --tail=10 bot
 }
 
+bot_running() {
+  compose ps --status running --services 2>/dev/null | grep -qx bot
+}
+
 cmd_backup() {
+  bot_running || die "机器人没在运行，没法在线备份。先 tgbot restart。"
   local name target
   name="relay-$(date +%Y%m%d-%H%M%S).db"
   target="$DIR/backups"
@@ -25,12 +30,21 @@ cmd_backup() {
   chmod 700 "$target"
   # 用数据库自带的在线备份，不用停机，也不会拷到写了一半的文件
   run_node backup "/data/$name"
-  umask 077
   # 容器根目录只读、/tmp 是内存盘，docker cp 取不到，所以写进数据卷后用 cat 取出
-  compose exec -T bot cat "/data/$name" > "$target/$name"
+  # 子 shell 限定 umask，不影响后面调用的安装脚本
+  ( umask 077; compose exec -T bot cat "/data/$name" > "$target/$name" )
   compose exec -T bot rm -f "/data/$name"
   [ -s "$target/$name" ] || die "备份文件是空的，请检查机器人是否在运行。"
   printf '已备份到 %s\n' "$target/$name"
+}
+
+# 更新、恢复之前尽量备份；机器人挂了也不能拦住修复
+backup_if_possible() {
+  if bot_running; then
+    cmd_backup
+  else
+    printf '机器人没在运行，跳过这次备份。\n'
+  fi
 }
 
 cmd_restore() {
@@ -41,7 +55,7 @@ cmd_restore() {
   local answer
   read -r -p "确认恢复？输入「恢复」继续: " answer
   [ "$answer" = "恢复" ] || { printf '已取消。\n'; return; }
-  cmd_backup
+  backup_if_possible
   compose stop bot
   # 容器停了也能往数据卷里写：临时起一个只挂卷的容器
   local volume
@@ -54,7 +68,11 @@ cmd_restore() {
 
 cmd_update() {
   printf '更新前先备份数据…\n'
-  cmd_backup
+  backup_if_possible
+  if [ -n "${TGBOTSX_SOURCE:-}" ]; then
+    TGBOTSX_YES=1 bash "$TGBOTSX_SOURCE/deploy/install.sh"
+    return
+  fi
   local installer
   installer="$(mktemp)"
   curl -fsSL --max-time 60 "$INSTALL_URL" -o "$installer" || die "下载安装脚本失败。"
@@ -86,7 +104,7 @@ cmd_uninstall() {
   read -r -p "确认卸载？输入「卸载」继续: " confirm
   [ "$confirm" = "卸载" ] || { printf '已取消。\n'; return; }
   if [ "$answer" = "删除数据" ]; then
-    cmd_backup
+    backup_if_possible
     compose down -v
     printf '数据已删除，最后一份备份在 %s/backups（确认不需要后自己删）。\n' "$DIR"
     rm -f /usr/local/bin/tgbot

@@ -3,7 +3,7 @@ import type { Message, MessageReactionUpdated } from "@grammyjs/types";
 import type { App } from "./app.ts";
 import { getContact } from "./contacts.ts";
 import { copyToDesk, deskChatId } from "./desk.ts";
-import { describe, escapeHtml } from "./message-info.ts";
+import { clipHtml, describe, escapeHtml } from "./message-info.ts";
 import { findByDesk, findByUserMsg } from "./messages.ts";
 import type { StoredMessage } from "./messages.ts";
 import { TelegramError } from "./telegram.ts";
@@ -49,7 +49,7 @@ export async function handleContactEdit(app: App, message: Message, userId: numb
       reply_parameters: { message_id: stored.deskMsgId, allow_sending_without_reply: true },
       disable_notification: true,
       parse_mode: "HTML",
-      text: before ? `对方改了这条消息，原文：\n<blockquote>${escapeHtml(before.slice(0, 1500))}</blockquote>` : "对方改了这条消息。",
+      text: before ? `对方改了这条消息，原文：\n<blockquote>${clipHtml(before, 3500)}</blockquote>` : "对方改了这条消息。",
     });
   } catch (error) {
     app.log("warn", `同步对方编辑失败（联系人 ${userId}）`, error instanceof Error ? error.message : String(error));

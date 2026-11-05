@@ -9,7 +9,7 @@ import { formatTime, fullName, identityHtml } from "./contacts.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
 import type { Params } from "./telegram.ts";
-import { escapeHtml } from "./message-info.ts";
+import { clipHtml, escapeHtml } from "./message-info.ts";
 
 export interface DeskTarget {
   chatId: number;
@@ -63,7 +63,7 @@ export function cardText(app: App, contact: Contact): string {
   const meta = [`首次联系 ${formatTime(contact.firstSeen, app.settings.timezone)}`, `累计 ${contact.msgCount} 条`];
   if (contact.languageCode) meta.push(`语言 ${escapeHtml(contact.languageCode)}`);
   lines.push(meta.join(" · "));
-  if (contact.note) lines.push(`备注：${escapeHtml(contact.note)}`);
+  if (contact.note) lines.push(`备注：${clipHtml(contact.note, 1500)}`);
   if (contact.blockedAt !== null) lines.push(`已屏蔽${contact.blockReason ? `（${escapeHtml(contact.blockReason)}）` : ""}`);
   if (contact.unreachableAt !== null) lines.push("对方已拉黑机器人或账号不可用");
   return lines.join("\n");
