@@ -1,7 +1,7 @@
 // 真实走一遍安装脚本：Docker 构建、启动、认领、备份、恢复、重复安装、卸载。
 // 只在有 Docker 且有 root 权限的 Linux 上跑（CI 里跑）。
 import { execSync, spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { startFakeTelegram } from "./fake-telegram.ts";
 
@@ -41,7 +41,7 @@ console.log(first.out.split("\n").slice(-12).join("\n"));
 check("安装脚本成功退出", first.code === 0, first.out);
 check("输出了认领链接", /start=claim_/.test(first.out));
 check("输出里没有 Token 明文", !first.out.includes(TOKEN));
-check(".env 权限是 600", (statSync(`${DIR}/.env`).mode & 0o777) === 0o600);
+check(".env 权限是 600", execSync(`sudo stat -c %a ${DIR}/.env`, { encoding: "utf8" }).trim() === "600");
 check("tgbot 命令已安装", existsSync("/usr/local/bin/tgbot"));
 
 const code = /claim_([\w-]+)/.exec(first.out)?.[1] ?? "";
@@ -58,9 +58,12 @@ check("tgbot status 可用", status.code === 0 && status.out.includes("tg-botsx"
 
 const backup = await sudo("tgbot backup");
 check("tgbot backup 成功", backup.code === 0, backup.out);
-const backups = readdirSync(`${DIR}/backups`);
-const backupFile = `${DIR}/backups/${backups[0]}`;
-check("备份文件是有效的 SQLite", backups.length === 1 && readFileSync(backupFile).subarray(0, 15).toString() === "SQLite format 3", backups);
+// 备份目录是 root 专属（700），要用 sudo 读
+const listed = execSync(`sudo ls ${DIR}/backups`, { encoding: "utf8" }).trim().split("\n");
+const backupFile = `${DIR}/backups/${listed[0]}`;
+const header = execSync(`sudo head -c 15 ${backupFile}`, { encoding: "utf8" });
+const mode = execSync(`sudo stat -c %a ${backupFile}`, { encoding: "utf8" }).trim();
+check("备份文件是有效的 SQLite，权限 600", listed.length === 1 && header === "SQLite format 3" && mode === "600", `${listed.join(",")} ${header} ${mode}`);
 
 // 重复安装：不能丢数据
 const again = await sudo("bash deploy/install.sh");
