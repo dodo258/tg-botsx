@@ -1,0 +1,22 @@
+# 不用 Docker 时的 systemd 配置。放到 /etc/systemd/system/，按实际路径改 WorkingDirectory。
+[Unit]
+Description=传声筒 Telegram 双向机器人
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/tg-botsx
+EnvironmentFile=/opt/tg-botsx/.env
+ExecStart=/usr/bin/env node --disable-warning=ExperimentalWarning src/runtime/node.ts
+Restart=always
+RestartSec=5
+DynamicUser=yes
+StateDirectory=tg-botsx
+Environment=DATA_DIR=/var/lib/tg-botsx
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

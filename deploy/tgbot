@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# 传声筒管理命令。不带参数显示菜单。
+set -euo pipefail
+
+DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
+INSTALL_URL="https://raw.githubusercontent.com/${TGBOTSX_REPO:-dodo258/tg-botsx}/${TGBOTSX_BRANCH:-main}/deploy/install.sh"
+
+die() { printf '错误：%s\n' "$*" >&2; exit 1; }
+[ -f "$DIR/docker-compose.yml" ] || die "在 $DIR 没找到安装。先运行安装脚本。"
+[ "$(id -u)" -eq 0 ] || exec sudo -E "$0" "$@"
+compose() { (cd "$DIR" && docker compose "$@"); }
+run_node() { compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts "$@"; }
+
+cmd_status() {
+  compose ps
+  printf '\n最近日志：\n'
+  compose logs --tail=10 bot
+}
+
+cmd_backup() {
+  local name target
+  name="relay-$(date +%Y%m%d-%H%M%S).db"
+  target="$DIR/backups"
+  mkdir -p "$target"
+  chmod 700 "$target"
+  # 用数据库自带的在线备份，不用停机，也不会拷到写了一半的文件
+  run_node backup "/data/$name"
+  umask 077
+  # 容器根目录只读、/tmp 是内存盘，docker cp 取不到，所以写进数据卷后用 cat 取出
+  compose exec -T bot cat "/data/$name" > "$target/$name"
+  compose exec -T bot rm -f "/data/$name"
+  [ -s "$target/$name" ] || die "备份文件是空的，请检查机器人是否在运行。"
+  printf '已备份到 %s\n' "$target/$name"
+}
+
+cmd_restore() {
+  local source="${1:-}"
+  [ -n "$source" ] || die "用法：tgbot restore 备份文件"
+  [ -f "$source" ] || die "找不到 $source"
+  printf '会用这个备份覆盖现有数据（覆盖前会先备份一次）：%s\n' "$source"
+  local answer
+  read -r -p "确认恢复？输入「恢复」继续: " answer
+  [ "$answer" = "恢复" ] || { printf '已取消。\n'; return; }
+  cmd_backup
+  compose stop bot
+  # 容器停了也能往数据卷里写：临时起一个只挂卷的容器
+  local volume
+  volume="$(cd "$DIR" && docker compose config --volumes | head -n 1)"
+  docker run --rm -v "$(basename "$DIR")_${volume}:/data" -v "$(realpath "$source"):/restore.db:ro" node:26-alpine \
+    sh -c 'rm -f /data/relay.db-wal /data/relay.db-shm && cp /restore.db /data/relay.db && chown node:node /data/relay.db'
+  compose start bot
+  printf '已恢复。\n'
+}
+
+cmd_update() {
+  printf '更新前先备份数据…\n'
+  cmd_backup
+  local installer
+  installer="$(mktemp)"
+  curl -fsSL --max-time 60 "$INSTALL_URL" -o "$installer" || die "下载安装脚本失败。"
+  TGBOTSX_YES=1 bash "$installer"
+  rm -f "$installer"
+}
+
+cmd_token() {
+  local token
+  read -r -s -p "粘贴新的 Bot Token（输入时不显示）: " token
+  printf '\n'
+  [ -n "$token" ] || die "没有输入。"
+  local updated
+  umask 077
+  updated="$(mktemp)"
+  grep -v '^BOT_TOKEN=' "$DIR/.env" > "$updated" || true
+  printf 'BOT_TOKEN=%s\n' "$token" >> "$updated"
+  cat "$updated" > "$DIR/.env"
+  rm -f "$updated"
+  chmod 600 "$DIR/.env"
+  compose up -d
+  printf '已更新并重启。\n'
+}
+
+cmd_uninstall() {
+  printf '会停止并删除机器人程序。\n'
+  local answer
+  read -r -p "同时删除所有聊天数据吗？要删请输入「删除数据」，直接回车保留: " answer
+  read -r -p "确认卸载？输入「卸载」继续: " confirm
+  [ "$confirm" = "卸载" ] || { printf '已取消。\n'; return; }
+  if [ "$answer" = "删除数据" ]; then
+    cmd_backup
+    compose down -v
+    printf '数据已删除，最后一份备份在 %s/backups（确认不需要后自己删）。\n' "$DIR"
+    rm -f /usr/local/bin/tgbot
+    rm -rf "$DIR/src" "$DIR/package.json" "$DIR/Dockerfile" "$DIR/.dockerignore" "$DIR/.env.example" "$DIR/docker-compose.yml"
+  else
+    compose down
+    rm -f /usr/local/bin/tgbot
+    printf '程序已停止。数据保留在 Docker 数据卷，配置在 %s，重新安装会接着用。\n' "$DIR"
+  fi
+}
+
+menu() {
+  cat <<'MENU'
+传声筒 管理菜单
+  1) 查看状态
+  2) 查看实时日志
+  3) 重启
+  4) 更新到最新版（会先备份）
+  5) 备份数据
+  6) 恢复数据
+  7) 重新绑定管理员
+  8) 更换 Bot Token
+  9) 卸载
+  0) 退出
+MENU
+  local choice file
+  read -r -p "选择: " choice
+  case "$choice" in
+    1) cmd_status ;;
+    2) compose logs -f --tail=50 bot ;;
+    3) compose restart bot ;;
+    4) cmd_update ;;
+    5) cmd_backup ;;
+    6) read -r -p "备份文件路径: " file; cmd_restore "$file" ;;
+    7) run_node claim ;;
+    8) cmd_token ;;
+    9) cmd_uninstall ;;
+    *) ;;
+  esac
+}
+
+case "${1:-}" in
+  "") menu ;;
+  status) cmd_status ;;
+  logs) compose logs -f --tail=50 bot ;;
+  restart) compose restart bot ;;
+  update) cmd_update ;;
+  backup) cmd_backup ;;
+  restore) cmd_restore "${2:-}" ;;
+  claim) run_node claim ;;
+  token) cmd_token ;;
+  uninstall) cmd_uninstall ;;
+  *) printf '用法：tgbot [status|logs|restart|update|backup|restore 文件|claim|token|uninstall]\n' ;;
+esac
