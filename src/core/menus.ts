@@ -1,0 +1,258 @@
+// /settings 菜单：所有配置都在 Telegram 里改，不需要网页后台，也不用重新部署。
+import type { Message } from "@grammyjs/types";
+import type { App } from "./app.ts";
+import { str } from "./db.ts";
+import { escapeHtml } from "./message-info.ts";
+import type { Settings } from "./settings.ts";
+import { saveSetting } from "./settings.ts";
+
+type Button = { text: string; callback_data: string };
+export interface Menu {
+  text: string;
+  keyboard: { inline_keyboard: Button[][] };
+}
+
+const onOff = (value: boolean) => (value ? "开" : "关");
+const BACK: Button[] = [{ text: "返回", callback_data: "m:main" }];
+
+export function deskModeLabel(settings: Settings): string {
+  if (settings.deskMode === "group") return "话题群（可多人协作）";
+  if (settings.deskMode === "dm_topics") return "私聊话题（实验）";
+  return "私聊卡片";
+}
+
+export function renderMenu(app: App, page: string): Menu {
+  const s = app.settings;
+  switch (page) {
+    case "desk":
+      return {
+        text:
+          `<b>消息收在哪</b>\n当前：${deskModeLabel(s)}\n\n` +
+          "<b>私聊卡片</b>：什么都不用配，消息都到你和机器人的私聊里。\n" +
+          "<b>话题群</b>：每个联系人一个话题，可以拉同事一起回复。先建一个开了话题的超级群，把机器人设为管理员（给“管理话题”权限），再在群里发 /bindgroup。\n" +
+          "<b>私聊话题</b>：不用建群也有话题，需要先在 @BotFather 的 Mini App 里打开话题模式。这个开关是机器人全局的，普通用户的聊天界面也可能变化，所以算实验功能。",
+        keyboard: {
+          inline_keyboard: [
+            [{ text: s.deskMode === "dm" ? "✓ 私聊卡片" : "私聊卡片", callback_data: "mc:deskMode:dm" }],
+            [{ text: s.deskMode === "dm_topics" ? "✓ 私聊话题（实验）" : "私聊话题（实验）", callback_data: "mc:deskMode:dm_topics" }],
+            BACK,
+          ],
+        },
+      };
+    case "verify":
+      return {
+        text:
+          "<b>人机验证</b>\n陌生人第一次发消息要答一道题，验证前发的消息会暂存，通过后自动转给你。\n\n" +
+          `状态：${s.verifyMode === "quiz" ? "开" : "关"}\n` +
+          `有效期：${s.verifyTtlDays === 0 ? "通过一次永久有效" : `${s.verifyTtlDays} 天`}`,
+        keyboard: {
+          inline_keyboard: [
+            [{ text: s.verifyMode === "quiz" ? "关闭验证" : "打开验证", callback_data: "mc:verifyMode:" + (s.verifyMode === "quiz" ? "off" : "quiz") }],
+            [{ text: "改有效期", callback_data: "mi:verifyTtlDays" }],
+            BACK,
+          ],
+        },
+      };
+    case "auto":
+      return {
+        text:
+          "<b>自动回复</b>\n\n" +
+          `<b>欢迎语</b>（/start 时发送）：\n${escapeHtml(s.welcome)}\n\n` +
+          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：\n${escapeHtml(s.receipt)}\n\n` +
+          `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${escapeHtml(s.offlineMessage)}\n\n` +
+          "关键词自动回复用 /rule 管理。",
+        keyboard: {
+          inline_keyboard: [
+            [{ text: "改欢迎语", callback_data: "mi:welcome" }],
+            [{ text: `收到回执：${onOff(s.receiptEnabled)}`, callback_data: "mt:receiptEnabled" }, { text: "改回执文字", callback_data: "mi:receipt" }],
+            [{ text: `离线回复：${onOff(s.offlineEnabled)}`, callback_data: "mt:offlineEnabled" }, { text: "改离线文字", callback_data: "mi:offlineMessage" }],
+            [{ text: "改在线时段", callback_data: "mi:onlineHours" }, { text: "改时区", callback_data: "mi:timezone" }],
+            BACK,
+          ],
+        },
+      };
+    case "filter":
+      return {
+        text:
+          "<b>防骚扰</b>\n命中规则的消息进隔离区，不会丢，用 /filtered 查看和放行。\n\n" +
+          `屏蔽关键词：${s.blockedKeywords.length ? escapeHtml(s.blockedKeywords.join("、")) : "无"}\n` +
+          `新联系人发链接进隔离：${onOff(s.blockLinksForNew)}\n` +
+          `转发内容进隔离：${onOff(s.blockForwards)}\n` +
+          `新联系人先审核再转发：${onOff(s.reviewNewContacts)}\n` +
+          `每人每分钟上限：${s.messagesPerMinute} 条\n` +
+          `防轰炸阈值：10 分钟新增 ${s.floodThreshold} 人`,
+        keyboard: {
+          inline_keyboard: [
+            [{ text: "改屏蔽关键词", callback_data: "mi:blockedKeywords" }],
+            [{ text: `发链接：${onOff(s.blockLinksForNew)}`, callback_data: "mt:blockLinksForNew" }, { text: `转发：${onOff(s.blockForwards)}`, callback_data: "mt:blockForwards" }],
+            [{ text: `先审核：${onOff(s.reviewNewContacts)}`, callback_data: "mt:reviewNewContacts" }],
+            [{ text: "改每分钟上限", callback_data: "mi:messagesPerMinute" }, { text: "改防轰炸阈值", callback_data: "mi:floodThreshold" }],
+            BACK,
+          ],
+        },
+      };
+    case "data":
+      return {
+        text:
+          "<b>数据</b>\n\n" +
+          `聊天内容保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}\n` +
+          "到期后抹掉文字和文件编号，联系人和回复关系还在，老消息依然能回复。\n\n" +
+          "/cleanup 手动清理，/export 导出全部数据。",
+        keyboard: { inline_keyboard: [[{ text: "改保留天数", callback_data: "mi:retentionDays" }], BACK] },
+      };
+    default:
+      return {
+        text: `<b>设置</b>\n\n消息收在：${deskModeLabel(s)}\n人机验证：${s.verifyMode === "quiz" ? "开" : "关"}\n聊天保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}`,
+        keyboard: {
+          inline_keyboard: [
+            [{ text: "消息收在哪", callback_data: "m:desk" }, { text: "人机验证", callback_data: "m:verify" }],
+            [{ text: "自动回复", callback_data: "m:auto" }, { text: "防骚扰", callback_data: "m:filter" }],
+            [{ text: "数据", callback_data: "m:data" }],
+          ],
+        },
+      };
+  }
+}
+
+/** 能开关的配置项 → 所在菜单页 */
+export const TOGGLES: Record<string, { key: "receiptEnabled" | "offlineEnabled" | "blockLinksForNew" | "blockForwards" | "reviewNewContacts"; page: string }> = {
+  receiptEnabled: { key: "receiptEnabled", page: "auto" },
+  offlineEnabled: { key: "offlineEnabled", page: "auto" },
+  blockLinksForNew: { key: "blockLinksForNew", page: "filter" },
+  blockForwards: { key: "blockForwards", page: "filter" },
+  reviewNewContacts: { key: "reviewNewContacts", page: "filter" },
+};
+
+interface InputSpec {
+  prompt: string;
+  /** 校验并保存，返回错误提示；返回 null 表示成功 */
+  apply(app: App, text: string): Promise<string | null>;
+}
+
+function intInput(prompt: string, key: "verifyTtlDays" | "messagesPerMinute" | "floodThreshold" | "retentionDays", min: number, max: number): InputSpec {
+  return {
+    prompt,
+    async apply(app, text) {
+      const value = Number(text.trim());
+      if (!Number.isInteger(value) || value < min || value > max) return `请发 ${min} 到 ${max} 之间的整数。`;
+      await saveSetting(app.db, app.settings, key, value);
+      return null;
+    },
+  };
+}
+
+function textInput(prompt: string, key: "welcome" | "receipt" | "offlineMessage"): InputSpec {
+  return {
+    prompt,
+    async apply(app, text) {
+      if (text.length > 2000) return "太长了，请控制在 2000 字以内。";
+      await saveSetting(app.db, app.settings, key, text);
+      return null;
+    },
+  };
+}
+
+export const INPUTS: Record<string, InputSpec> = {
+  welcome: textInput("发来新的欢迎语。", "welcome"),
+  receipt: textInput("发来新的收到回执。", "receipt"),
+  offlineMessage: textInput("发来新的离线回复。", "offlineMessage"),
+  verifyTtlDays: intInput("验证多少天有效？发 0 表示通过一次永久有效。", "verifyTtlDays", 0, 3650),
+  messagesPerMinute: intInput("每人每分钟最多多少条？", "messagesPerMinute", 1, 600),
+  floodThreshold: intInput("10 分钟内新增多少个陌生人算被轰炸？", "floodThreshold", 3, 100000),
+  retentionDays: intInput("聊天内容保留多少天？发 0 表示永久。", "retentionDays", 0, 36500),
+  blockedKeywords: {
+    prompt: "发来屏蔽关键词，用逗号或换行分隔。发 0 清空。",
+    async apply(app, text) {
+      const words = text.trim() === "0" ? [] : text.split(/[,，、\n]/).map((word) => word.trim()).filter(Boolean);
+      if (words.length > 500) return "最多 500 个关键词。";
+      await saveSetting(app.db, app.settings, "blockedKeywords", words);
+      return null;
+    },
+  },
+  onlineHours: {
+    prompt: "发来在线时段，24 小时制，比如 9-22。跨夜写 22-6。",
+    async apply(app, text) {
+      const match = /^\s*(\d{1,2})\s*[-–~到]\s*(\d{1,2})\s*$/.exec(text);
+      const from = Number(match?.[1]);
+      const to = Number(match?.[2]);
+      if (!match || from > 23 || to > 24 || from === to) return "格式不对，比如 9-22。";
+      await saveSetting(app.db, app.settings, "onlineFrom", from);
+      await saveSetting(app.db, app.settings, "onlineTo", to);
+      return null;
+    },
+  },
+  timezone: {
+    prompt: "发来时区，比如 Asia/Shanghai、Asia/Tokyo、Europe/London。",
+    async apply(app, text) {
+      const zone = text.trim();
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: zone });
+      } catch {
+        return "没有这个时区，写法比如 Asia/Shanghai。";
+      }
+      await saveSetting(app.db, app.settings, "timezone", zone);
+      return null;
+    },
+  },
+};
+
+const AWAITING_TTL = 10 * 60;
+
+export async function setAwaiting(app: App, staffId: number, what: string): Promise<void> {
+  await app.db
+    .prepare("INSERT INTO staff_state(staff_id, awaiting, awaiting_at) VALUES(?, ?, ?) ON CONFLICT(staff_id) DO UPDATE SET awaiting = excluded.awaiting, awaiting_at = excluded.awaiting_at")
+    .bind(staffId, what, app.now())
+    .run();
+}
+
+export async function clearAwaiting(app: App, staffId: number): Promise<void> {
+  await app.db.prepare("UPDATE staff_state SET awaiting = NULL, awaiting_at = NULL WHERE staff_id = ?").bind(staffId).run();
+}
+
+/** 管理员刚点过「改 xx」，下一条消息当作输入。返回 true 表示已处理。 */
+export async function handleAwaitingInput(app: App, message: Message, staffId: number): Promise<boolean> {
+  const row = await app.db.prepare("SELECT awaiting, awaiting_at FROM staff_state WHERE staff_id = ?").bind(staffId).first<{ awaiting: unknown; awaiting_at: unknown }>();
+  const awaiting = str(row?.awaiting);
+  if (!awaiting || typeof row?.awaiting_at !== "number" || app.now() - row.awaiting_at > AWAITING_TTL) return false;
+  const text = message.text ?? "";
+  const reply = (body: string) =>
+    app.tg.call("sendMessage", {
+      chat_id: message.chat.id,
+      ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
+      text: body,
+    });
+  if (text === "/cancel") {
+    await clearAwaiting(app, staffId);
+    await reply("已取消。");
+    return true;
+  }
+  if (text.startsWith("/")) return false;
+  if (!text) {
+    await reply("这里要发文字。发 /cancel 取消。");
+    return true;
+  }
+  if (awaiting.startsWith("note:")) {
+    const userId = Number(awaiting.slice(5));
+    if (!Number.isSafeInteger(userId)) {
+      await clearAwaiting(app, staffId);
+      return false;
+    }
+    await app.db.prepare("UPDATE contacts SET note = ? WHERE user_id = ?").bind(text.trim() === "0" ? "" : text.slice(0, 500), userId).run();
+    await clearAwaiting(app, staffId);
+    await reply("备注已保存。");
+    return true;
+  }
+  const spec = INPUTS[awaiting];
+  if (!spec) {
+    await clearAwaiting(app, staffId);
+    return false;
+  }
+  const failure = await spec.apply(app, text);
+  if (failure) {
+    await reply(`${failure}\n发 /cancel 取消。`);
+    return true;
+  }
+  await clearAwaiting(app, staffId);
+  await reply("已保存。发 /settings 查看。");
+  return true;
+}

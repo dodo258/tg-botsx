@@ -1,0 +1,471 @@
+// 管理员命令。在私聊和绑定的话题群里都能用；改配置、群发、导出这类只有主人能用。
+import type { Message } from "@grammyjs/types";
+import type { App } from "./app.ts";
+import { isOwner } from "./app.ts";
+import type { Contact } from "./contacts.ts";
+import { dayKey, formatTime, fullName, getContact, identityHtml, toContact } from "./contacts.ts";
+import { num, str } from "./db.ts";
+import { cardText, contactKeyboard, usesThreads } from "./desk.ts";
+import { deskModeLabel, renderMenu, setAwaiting } from "./menus.ts";
+import { escapeHtml, kindLabel } from "./message-info.ts";
+import { toMessage } from "./messages.ts";
+import { failureText, markUnreachable, recordOutbound, routeOf } from "./outbound.ts";
+import { fetchBot, syncCommands } from "./setup.ts";
+import { saveSetting } from "./settings.ts";
+import { SCHEMA_VERSION } from "./schema.ts";
+import { retract } from "./sync.ts";
+import { TelegramError } from "./telegram.ts";
+
+export const VERSION = "0.1.0";
+
+export function parseCommand(text: string | undefined, botUsername: string): { name: string; args: string } | null {
+  const match = /^\/([a-zA-Z_]+)(?:@(\w+))?(?:\s+([\s\S]*))?$/.exec(text ?? "");
+  if (!match) return null;
+  const target = match[2];
+  // 群里 @别的机器人 的命令不归我们管
+  if (target && botUsername && target.toLowerCase() !== botUsername.toLowerCase()) return null;
+  return { name: (match[1] ?? "").toLowerCase(), args: (match[3] ?? "").trim() };
+}
+
+const HELP =
+  "<b>怎么回复</b>\n" +
+  "回复转来的那条消息，就是回复对方。对方看不到你的账号。\n" +
+  "话题模式下直接在话题里发。私聊模式也可以点卡片上的「选中」，之后直接发。\n" +
+  "发出去后你的消息上会出现 👌。以 // 开头的话留在这里，不会发给对方。\n\n" +
+  "<b>联系人</b>\n" +
+  "/list 最近会话\n/search 关键词\n/history 聊天记录\n/note 备注内容\n/block /unblock 屏蔽和解除\n\n" +
+  "<b>消息</b>\n" +
+  "/del 回复自己发的消息，撤回它（48 小时内）\n/q 快捷回复列表，/q 名字 发送\n/qadd 名字 内容，/qdel 名字\n/filtered 隔离区\n\n" +
+  "<b>统计</b>\n/stats\n\n" +
+  "<b>只有主人能用</b>\n" +
+  "/settings 设置\n/rule 关键词自动回复\n/broadcast 回复一条消息后群发\n/bindgroup 在群里发，绑定话题群\n/status 运行状态\n/cleanup 清理记录\n/export 导出数据\n\n" +
+  "以上命令后面可以跟联系人数字 ID，比如 /history 123456；不跟就用当前话题、引用或选中的会话。";
+
+const PAGE = 8;
+
+async function say(app: App, message: Message, html: string, keyboard?: unknown): Promise<void> {
+  await app.tg.call("sendMessage", {
+    chat_id: message.chat.id,
+    ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
+    text: html,
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
+    ...(keyboard === undefined ? {} : { reply_markup: keyboard }),
+  });
+}
+
+function parseUserId(value: string): number | null {
+  const id = Number(value);
+  return /^\d+$/.test(value) && Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/** 命令的目标联系人：参数里的 ID 优先，其次当前上下文。 */
+async function targetContact(app: App, message: Message, staffId: number, arg: string): Promise<Contact | null> {
+  const id = parseUserId(arg.split(/\s+/)[0] ?? "");
+  if (id !== null) return await getContact(app, id);
+  const route = await routeOf(app, message, staffId);
+  return route?.contact ?? null;
+}
+
+export async function renderSessions(app: App, offset: number): Promise<{ text: string; keyboard: unknown }> {
+  const rows = await app.db.prepare("SELECT * FROM contacts ORDER BY last_seen DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
+  const contacts = rows.slice(0, PAGE).map(toContact);
+  if (contacts.length === 0) return { text: offset === 0 ? "还没有人联系过。把机器人链接发出去试试。" : "没有更多了。", keyboard: undefined };
+  const lines = contacts.map((contact) => {
+    const unread = contact.unread > 0 ? `<b>未读 ${contact.unread}</b> · ` : "";
+    const blocked = contact.blockedAt === null ? "" : "已屏蔽 · ";
+    return `${identityHtml(contact)}\n${blocked}${unread}${formatTime(contact.lastSeen, app.settings.timezone)}`;
+  });
+  const buttons = contacts.map((contact) => [{ text: `${contact.unread > 0 ? `(${contact.unread}) ` : ""}${fullName(contact)}`.slice(0, 40), callback_data: `open:${contact.userId}` }]);
+  const nav = [];
+  if (offset > 0) nav.push({ text: "上一页", callback_data: `list:${Math.max(0, offset - PAGE)}` });
+  if (rows.length > PAGE) nav.push({ text: "下一页", callback_data: `list:${offset + PAGE}` });
+  if (nav.length > 0) buttons.push(nav);
+  return { text: `<b>最近会话</b>\n\n${lines.join("\n\n")}`, keyboard: { inline_keyboard: buttons } };
+}
+
+export async function renderHistory(app: App, userId: number, offset: number): Promise<{ text: string; keyboard: unknown }> {
+  const contact = await getContact(app, userId);
+  const rows = await app.db.prepare("SELECT * FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?").bind(userId, PAGE + 1, offset).all();
+  const shown = rows.slice(0, PAGE).map(toMessage).reverse();
+  const title = contact ? identityHtml(contact) : String(userId);
+  if (shown.length === 0) return { text: `${title}\n\n没有记录。`, keyboard: undefined };
+  const lines = shown.map((row) => {
+    const who = row.direction === "in" ? "对方" : "我方";
+    const flags = [row.retractedAt !== null ? "已撤回" : "", row.status === "filtered" ? `隔离：${row.reason ?? ""}` : "", row.status === "failed" ? "待补发" : ""].filter(Boolean).join("，");
+    const body = row.text ?? (row.fileId || row.kind !== "text" ? `[${kindLabel(row.kind)}]` : "[内容已清理]");
+    return `<code>${formatTime(row.createdAt, app.settings.timezone)}</code> <b>${who}</b>${flags ? `（${escapeHtml(flags)}）` : ""}\n${escapeHtml(body.slice(0, 400))}`;
+  });
+  const buttons = [];
+  if (rows.length > PAGE) buttons.push({ text: "更早", callback_data: `history:${userId}:${offset + PAGE}` });
+  if (offset > 0) buttons.push({ text: "更新", callback_data: `history:${userId}:${Math.max(0, offset - PAGE)}` });
+  return { text: `${title}\n\n${lines.join("\n\n")}`.slice(0, 4000), keyboard: buttons.length ? { inline_keyboard: [buttons] } : undefined };
+}
+
+export async function renderFiltered(app: App, offset: number): Promise<{ text: string; keyboard: unknown }> {
+  const rows = await app.db.prepare("SELECT * FROM messages WHERE status = 'filtered' ORDER BY id DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
+  const shown = rows.slice(0, PAGE).map(toMessage);
+  if (shown.length === 0) return { text: offset === 0 ? "隔离区是空的。" : "没有更多了。", keyboard: undefined };
+  const lines = shown.map((row, index) => `${index + 1}. <code>${row.userId}</code> · ${formatTime(row.createdAt, app.settings.timezone)} · ${escapeHtml(row.reason ?? "")}\n${escapeHtml((row.text ?? `[${kindLabel(row.kind)}]`).slice(0, 200))}`);
+  const buttons = shown.map((row, index) => [
+    { text: `放行 ${index + 1}`, callback_data: `release:${row.id}` },
+    { text: `屏蔽 ${index + 1}`, callback_data: `block:${row.userId}` },
+  ]);
+  if (rows.length > PAGE) buttons.push([{ text: "下一页", callback_data: `filtered:${offset + PAGE}` }]);
+  return { text: `<b>隔离区</b>\n\n${lines.join("\n\n")}`.slice(0, 4000), keyboard: { inline_keyboard: buttons } };
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`;
+  return `${(seconds / 3600).toFixed(1)} 小时`;
+}
+
+async function statsText(app: App): Promise<string> {
+  const today = dayKey(app.now(), app.settings.timezone);
+  const weekAgo = dayKey(app.now() - 6 * 86_400, app.settings.timezone);
+  const [todayRow, weekRow, totals] = await Promise.all([
+    app.db.prepare("SELECT * FROM daily_stats WHERE day = ?").bind(today).first(),
+    app.db.prepare("SELECT SUM(inbound) AS inbound, SUM(outbound) AS outbound, SUM(new_contacts) AS new_contacts, SUM(filtered) AS filtered, SUM(reply_seconds) AS reply_seconds, SUM(replies) AS replies FROM daily_stats WHERE day >= ?").bind(weekAgo).first(),
+    app.db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN unread > 0 THEN 1 ELSE 0 END) AS unread, SUM(CASE WHEN blocked_at IS NOT NULL THEN 1 ELSE 0 END) AS blocked FROM contacts").first(),
+  ]);
+  const line = (row: Record<string, unknown> | null) => {
+    const replies = num(row?.replies);
+    const speed = replies > 0 ? formatDuration(num(row?.reply_seconds) / replies) : "暂无";
+    return `收到 ${num(row?.inbound)} · 回复 ${num(row?.outbound)} · 新联系人 ${num(row?.new_contacts)} · 拦截 ${num(row?.filtered)}\n平均首次回复：${speed}`;
+  };
+  return `<b>今天</b>\n${line(todayRow)}\n\n<b>近 7 天</b>\n${line(weekRow)}\n\n<b>总计</b>\n联系人 ${num(totals?.total)} · 有未读 ${num(totals?.unread)} · 已屏蔽 ${num(totals?.blocked)}`;
+}
+
+async function statusText(app: App, runtime: string): Promise<string> {
+  const lines = [`<b>运行状态</b>`, `版本 ${VERSION} · 数据库结构 v${SCHEMA_VERSION} · ${runtime}`, `消息收在：${deskModeLabel(app.settings)}`];
+  if (app.settings.floodUntil > app.now()) lines.push(`防轰炸中，到 ${formatTime(app.settings.floodUntil, app.settings.timezone)}`);
+  const failed = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE status = 'failed' AND direction = 'in'").first<{ n: unknown }>();
+  lines.push(`待补发消息：${num(failed?.n)}`);
+  const info = await app.tg.call<{ url?: string; pending_update_count?: number; last_error_date?: number; last_error_message?: string }>("getWebhookInfo");
+  if (info.url) {
+    lines.push(`Webhook 正常注册，待处理 ${info.pending_update_count ?? 0} 条`);
+    if (info.last_error_date) lines.push(`最近错误（${formatTime(info.last_error_date, app.settings.timezone)}）：${escapeHtml(info.last_error_message ?? "")}`);
+  } else {
+    lines.push("长轮询模式");
+  }
+  return lines.join("\n");
+}
+
+async function cmdQuick(app: App, message: Message, staffId: number, args: string): Promise<void> {
+  if (!args) {
+    const rows = await app.db.prepare("SELECT name, body FROM quick_replies ORDER BY name LIMIT 50").all<{ name: unknown; body: unknown }>();
+    if (rows.length === 0) {
+      await say(app, message, "还没有快捷回复。用 /qadd 名字 内容 添加。");
+      return;
+    }
+    await say(app, message, `<b>快捷回复</b>（/q 名字 发送）\n\n${rows.map((row) => `<code>${escapeHtml(str(row.name))}</code>：${escapeHtml(str(row.body).slice(0, 80))}`).join("\n")}`);
+    return;
+  }
+  const quick = await app.db.prepare("SELECT body FROM quick_replies WHERE name = ?").bind(args).first<{ body: unknown }>();
+  if (!quick) {
+    await say(app, message, `没有叫「${escapeHtml(args)}」的快捷回复。`);
+    return;
+  }
+  const route = await routeOf(app, message, staffId);
+  if (!route) {
+    await say(app, message, "不知道要发给谁。在话题里发，或回复对方的消息，或先选中会话。");
+    return;
+  }
+  const body = str(quick.body);
+  try {
+    const sent = await app.tg.call<{ message_id: number }>("sendMessage", { chat_id: route.contact.userId, text: body });
+    const shown = await app.tg.call<{ message_id: number }>("sendMessage", {
+      chat_id: message.chat.id,
+      ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
+      text: body,
+    });
+    await recordOutbound(app, route.contact, { kind: "text", text: body, fileId: "", userMsgId: sent.message_id, deskChatId: message.chat.id, deskMsgId: shown.message_id, staffId });
+  } catch (error) {
+    if (error instanceof TelegramError && error.userUnreachable) await markUnreachable(app, route.contact);
+    await say(app, message, failureText(route.contact, error));
+  }
+}
+
+async function cmdRule(app: App, message: Message, args: string): Promise<void> {
+  const [sub, ...rest] = args.split(/\s+/);
+  if (sub === "add") {
+    const parts = args.slice(3).split("|");
+    const keywords = parts[0]?.trim() ?? "";
+    const reply = parts.slice(1).join("|").trim();
+    if (!keywords || !reply) {
+      await say(app, message, "用法：/rule add 价格,多少钱 | 价格表在这里：…");
+      return;
+    }
+    await app.db.prepare("INSERT INTO auto_rules(keywords, reply, created_at) VALUES(?, ?, ?)").bind(keywords, reply, app.now()).run();
+    await say(app, message, "已添加。");
+    return;
+  }
+  if (sub === "del") {
+    const id = Number(rest[0]);
+    const changed = Number.isInteger(id) ? await app.db.prepare("DELETE FROM auto_rules WHERE id = ?").bind(id).run() : 0;
+    await say(app, message, changed ? "已删除。" : "没有这条规则。");
+    return;
+  }
+  const rows = await app.db.prepare("SELECT * FROM auto_rules ORDER BY id LIMIT 50").all();
+  const list = rows.map((row) => `${num(row.id)}. ${escapeHtml(str(row.keywords))} → ${escapeHtml(str(row.reply).slice(0, 60))}（命中 ${num(row.hits)}）`);
+  await say(app, message, `<b>关键词自动回复</b>\n\n${list.length ? list.join("\n") : "还没有。"}\n\n/rule add 关键词1,关键词2 | 回复内容\n/rule del 编号`);
+}
+
+async function cmdBroadcast(app: App, message: Message, args: string): Promise<void> {
+  if (args === "cancel") {
+    const changed = await app.db.prepare("UPDATE broadcasts SET state = 'cancelled', finished_at = ? WHERE state IN ('draft','running')").bind(app.now()).run();
+    await say(app, message, changed ? "群发已取消。" : "没有进行中的群发。");
+    return;
+  }
+  const source = message.reply_to_message;
+  if (!source) {
+    await say(app, message, "先写好要群发的内容，然后回复那条消息发 /broadcast。");
+    return;
+  }
+  const running = await app.db.prepare("SELECT id FROM broadcasts WHERE state = 'running' LIMIT 1").first();
+  if (running) {
+    await say(app, message, "上一次群发还没结束。/broadcast cancel 可取消。");
+    return;
+  }
+  const count = await app.db.prepare("SELECT COUNT(*) AS n FROM contacts WHERE blocked_at IS NULL AND unreachable_at IS NULL AND msg_count > 0").first<{ n: unknown }>();
+  const total = num(count?.n);
+  const row = await app.db
+    .prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, total, created_at) VALUES(?, ?, ?, ?, ?) RETURNING id")
+    .bind(message.chat.id, source.message_id, message.chat.id, total, app.now())
+    .first<{ id: unknown }>();
+  await say(app, message, `要把这条消息发给 ${total} 个联系人吗？已屏蔽和不可达的不发。`, {
+    inline_keyboard: [[{ text: `确认发给 ${total} 人`, callback_data: `bc_go:${num(row?.id)}` }, { text: "取消", callback_data: `bc_no:${num(row?.id)}` }]],
+  });
+}
+
+async function cmdExport(app: App, message: Message): Promise<void> {
+  const contacts = await app.db.prepare("SELECT * FROM contacts ORDER BY user_id").all();
+  const messages = await app.db.prepare("SELECT * FROM messages ORDER BY id DESC LIMIT 20000").all();
+  const data = JSON.stringify({ exportedAt: app.now(), version: VERSION, contacts, messages }, null, 1);
+  await app.tg.upload(
+    "sendDocument",
+    {
+      chat_id: message.chat.id,
+      caption: `联系人 ${contacts.length} 个，消息 ${messages.length} 条（最多导出最近 20000 条）。文件含聊天内容，注意保管。`,
+    },
+    "document",
+    new TextEncoder().encode(data),
+    `传声筒导出-${dayKey(app.now(), app.settings.timezone)}.json`,
+    "application/json",
+  );
+}
+
+/** 在群里绑定话题群。逐项检查并说清哪一步不对：匿名身份、没开话题、机器人没权限，是部署时最常见的三个坑。 */
+export async function cmdBindGroup(app: App, message: Message): Promise<void> {
+  if (message.chat.type === "private") {
+    await say(app, message, "请到你要绑定的话题群里发这个命令。");
+    return;
+  }
+  if (message.from?.is_bot || message.sender_chat) {
+    await say(app, message, "你现在是匿名管理员，机器人认不出你。\n到群设置把自己的「匿名」关掉，再发一次 /bindgroup，绑定后可以再打开。");
+    return;
+  }
+  if (!isOwner(app, message.from?.id)) {
+    await say(app, message, "只有机器人的主人能绑定。");
+    return;
+  }
+  const chat = await app.tg.call<{ is_forum?: boolean }>("getChat", { chat_id: message.chat.id });
+  if (message.chat.type !== "supergroup" || !chat.is_forum) {
+    await say(app, message, "这个群还没开话题。到群设置打开「话题」（Topics），再发一次 /bindgroup。");
+    return;
+  }
+  const bot = await fetchBot(app);
+  const member = await app.tg.call<{ status: string; can_manage_topics?: boolean }>("getChatMember", { chat_id: message.chat.id, user_id: bot.id });
+  if (member.status !== "administrator") {
+    await say(app, message, "机器人还不是这个群的管理员。把它设为管理员，并给「管理话题」权限，再发一次 /bindgroup。");
+    return;
+  }
+  if (!member.can_manage_topics) {
+    await say(app, message, "机器人缺「管理话题」权限。到管理员设置里打开，再发一次 /bindgroup。");
+    return;
+  }
+  await saveSetting(app.db, app.settings, "groupId", message.chat.id);
+  await saveSetting(app.db, app.settings, "deskMode", "group");
+  await app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
+  await syncCommands(app);
+  await say(app, message, "绑定成功。之后每个联系人会有自己的话题，群里的人都能在话题里回复。\n以 // 开头的话只留在群里，不会发给对方。");
+}
+
+export async function sendContactCard(app: App, message: Message, contact: Contact): Promise<void> {
+  await say(app, message, cardText(app, contact), contactKeyboard(contact, false, usesThreads(app)));
+}
+
+/** 处理一条命令。返回 false 表示不是我们认识的命令，由调用方决定怎么提示。 */
+export async function handleCommand(app: App, message: Message, staffId: number, name: string, args: string, runtime: string): Promise<boolean> {
+  const owner = isOwner(app, staffId);
+  const ownerOnly = async () => {
+    if (owner) return true;
+    await say(app, message, "这个命令只有主人能用。");
+    return false;
+  };
+  switch (name) {
+    case "start":
+      await say(app, message, `管理员已就绪。\n消息收在：${deskModeLabel(app.settings)}\n发 /help 看怎么用。`);
+      return true;
+    case "help":
+      await say(app, message, HELP);
+      return true;
+    case "list":
+    case "sessions": {
+      const page = await renderSessions(app, 0);
+      await say(app, message, page.text, page.keyboard);
+      return true;
+    }
+    case "search": {
+      if (!args) {
+        await say(app, message, "用法：/search 名字、用户名或 ID");
+        return true;
+      }
+      const pattern = `%${args.replace(/^@/, "").replace(/[%_]/g, "")}%`;
+      const rows = await app.db
+        .prepare("SELECT * FROM contacts WHERE CAST(user_id AS TEXT) = ? OR username LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR note LIKE ? ORDER BY last_seen DESC LIMIT 8")
+        .bind(args, pattern, pattern, pattern, pattern)
+        .all();
+      if (rows.length === 0) {
+        await say(app, message, "没找到。");
+        return true;
+      }
+      for (const row of rows) await sendContactCard(app, message, toContact(row));
+      return true;
+    }
+    case "history": {
+      const contact = await targetContact(app, message, staffId, args);
+      if (!contact) {
+        await say(app, message, "用法：/history 用户ID，或在话题里、回复对方消息时发。");
+        return true;
+      }
+      const page = await renderHistory(app, contact.userId, 0);
+      await say(app, message, page.text, page.keyboard);
+      return true;
+    }
+    case "select": {
+      await say(app, message, "直接点卡片上的「选中」按钮，或用 /search 找到人后点。");
+      return true;
+    }
+    case "note": {
+      const id = parseUserId(args.split(/\s+/)[0] ?? "");
+      const body = id === null ? args : args.split(/\s+/).slice(1).join(" ");
+      const contact = await targetContact(app, message, staffId, id === null ? "" : String(id));
+      if (!contact) {
+        await say(app, message, "用法：在话题里或回复对方消息时发 /note 内容，或 /note 用户ID 内容。");
+        return true;
+      }
+      if (!body) {
+        await setAwaiting(app, staffId, `note:${contact.userId}`);
+        await say(app, message, `给 ${identityHtml(contact)} 写备注，发 0 清空，发 /cancel 取消。\n现在的备注：${escapeHtml(contact.note) || "无"}`);
+        return true;
+      }
+      await app.db.prepare("UPDATE contacts SET note = ? WHERE user_id = ?").bind(body.slice(0, 500), contact.userId).run();
+      await say(app, message, "备注已保存。");
+      return true;
+    }
+    case "block":
+    case "unblock": {
+      const id = parseUserId(args);
+      const contact = id !== null ? await getContact(app, id) : (await routeOf(app, message, staffId))?.contact ?? null;
+      if (!contact) {
+        await say(app, message, `用法：/${name} 用户ID，或在话题里、回复对方消息时发。`);
+        return true;
+      }
+      const blocked = name === "block";
+      await app.db.prepare("UPDATE contacts SET blocked_at = ?, block_reason = '' WHERE user_id = ?").bind(blocked ? app.now() : null, contact.userId).run();
+      await say(app, message, `${blocked ? "已屏蔽" : "已解除屏蔽"}：${identityHtml(contact)}`);
+      return true;
+    }
+    case "blocked": {
+      const rows = await app.db.prepare("SELECT * FROM contacts WHERE blocked_at IS NOT NULL ORDER BY blocked_at DESC LIMIT 20").all();
+      if (rows.length === 0) {
+        await say(app, message, "没有屏蔽任何人。");
+        return true;
+      }
+      await say(app, message, `<b>已屏蔽</b>\n\n${rows.map(toContact).map(identityHtml).join("\n")}\n\n/unblock 用户ID 解除。`);
+      return true;
+    }
+    case "del": {
+      const source = message.reply_to_message;
+      if (!source) {
+        await say(app, message, "回复你发出去的那条消息，再发 /del。");
+        return true;
+      }
+      const route = await routeOf(app, message, staffId);
+      if (!route?.stored) {
+        await say(app, message, "这条消息没有记录，撤回不了。");
+        return true;
+      }
+      await say(app, message, await retract(app, route.stored));
+      return true;
+    }
+    case "q":
+      await cmdQuick(app, message, staffId, args);
+      return true;
+    case "qadd": {
+      const space = args.search(/\s/);
+      if (space <= 0) {
+        await say(app, message, "用法：/qadd 名字 内容");
+        return true;
+      }
+      await app.db
+        .prepare("INSERT INTO quick_replies(name, body, updated_at) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at")
+        .bind(args.slice(0, space), args.slice(space).trim(), app.now())
+        .run();
+      await say(app, message, "已保存。");
+      return true;
+    }
+    case "qdel": {
+      const changed = await app.db.prepare("DELETE FROM quick_replies WHERE name = ?").bind(args).run();
+      await say(app, message, changed ? "已删除。" : "没有这个快捷回复。");
+      return true;
+    }
+    case "filtered": {
+      const page = await renderFiltered(app, 0);
+      await say(app, message, page.text, page.keyboard);
+      return true;
+    }
+    case "stats":
+      await say(app, message, await statsText(app));
+      return true;
+    case "cancel":
+      await say(app, message, "没有进行中的操作。");
+      return true;
+    case "settings": {
+      if (!(await ownerOnly())) return true;
+      const menu = renderMenu(app, "main");
+      await say(app, message, menu.text, menu.keyboard);
+      return true;
+    }
+    case "rule":
+      if (await ownerOnly()) await cmdRule(app, message, args);
+      return true;
+    case "broadcast":
+      if (await ownerOnly()) await cmdBroadcast(app, message, args);
+      return true;
+    case "status":
+      if (await ownerOnly()) await say(app, message, await statusText(app, runtime));
+      return true;
+    case "export":
+      if (await ownerOnly()) await cmdExport(app, message);
+      return true;
+    case "cleanup":
+      if (await ownerOnly()) {
+        const total = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE text IS NOT NULL OR file_id IS NOT NULL").first<{ n: unknown }>();
+        await say(app, message, `现在有 ${num(total?.n)} 条带内容的记录。要清理多久以前的？\n只抹内容，联系人和回复关系都保留。`, {
+          inline_keyboard: [
+            [{ text: "30 天前", callback_data: "clean?:30" }, { text: "90 天前", callback_data: "clean?:90" }, { text: "180 天前", callback_data: "clean?:180" }],
+            [{ text: "全部", callback_data: "clean?:0" }, { text: "取消", callback_data: "dismiss" }],
+          ],
+        });
+      }
+      return true;
+    case "bindgroup":
+      await cmdBindGroup(app, message);
+      return true;
+    default:
+      return false;
+  }
+}

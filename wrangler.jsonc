@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tg-botsx",
+  "main": "src/runtime/worker.ts",
+  "compatibility_date": "2026-11-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  // 不写 database_id：Wrangler 和 Deploy 按钮都会自动创建 D1 并回填
+  "d1_databases": [{ "binding": "DB", "database_name": "tg-botsx" }]
+}
