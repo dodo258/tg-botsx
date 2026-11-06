@@ -85,11 +85,11 @@ export async function renderSessions(app: App, offset: number): Promise<{ text: 
   });
   const buttons = contacts.map((contact) => [{ text: `${contact.unread > 0 ? `(${contact.unread}) ` : ""}${fullName(contact)}`.slice(0, 40), callback_data: `open:${contact.userId}` }]);
   const nav = [];
-  if (offset > 0) nav.push({ text: "上一页", callback_data: `list:${Math.max(0, offset - PAGE)}` });
-  if (rows.length > PAGE) nav.push({ text: "下一页", callback_data: `list:${offset + PAGE}` });
+  if (offset > 0) nav.push({ text: "⬅️ 上一页", callback_data: `list:${Math.max(0, offset - PAGE)}` });
+  if (rows.length > PAGE) nav.push({ text: "➡️ 下一页", callback_data: `list:${offset + PAGE}` });
   if (nav.length > 0) buttons.push(nav);
   buttons.push(backRow());
-  return { text: `<b>最近会话</b>\n\n${lines.join("\n\n")}`, keyboard: { inline_keyboard: buttons } };
+  return { text: `<b>💬 最近会话</b>\n\n${lines.join("\n\n")}`, keyboard: { inline_keyboard: buttons } };
 }
 
 export async function renderHistory(app: App, userId: number, offset: number): Promise<{ text: string; keyboard: unknown }> {
@@ -107,8 +107,8 @@ export async function renderHistory(app: App, userId: number, offset: number): P
   // 最新的最重要：放不下时丢最早的
   const kept = fitLines([...lines].reverse(), "\n\n").kept.reverse().join("\n\n");
   const buttons = [];
-  if (rows.length > PAGE) buttons.push({ text: "更早", callback_data: `history:${userId}:${offset + PAGE}` });
-  if (offset > 0) buttons.push({ text: "更新", callback_data: `history:${userId}:${Math.max(0, offset - PAGE)}` });
+  if (rows.length > PAGE) buttons.push({ text: "⬅️ 更早", callback_data: `history:${userId}:${offset + PAGE}` });
+  if (offset > 0) buttons.push({ text: "➡️ 更新", callback_data: `history:${userId}:${Math.max(0, offset - PAGE)}` });
   return { text: `${title}\n\n${kept}`, keyboard: buttons.length ? { inline_keyboard: [buttons] } : undefined };
 }
 
@@ -118,20 +118,20 @@ export async function renderFiltered(app: App, offset: number): Promise<{ text: 
   if (shown.length === 0) return { text: offset === 0 ? "隔离区是空的。" : "没有更多了。", keyboard: { inline_keyboard: [backRow()] } };
   const lines = shown.map((row, index) => `${index + 1}. <code>${row.userId}</code> · ${formatTime(row.createdAt, app.settings.timezone)} · ${clipHtml(row.reason ?? "", 120)}\n${clipHtml(row.text ?? `[${kindLabel(row.kind)}]`, 300)}`);
   const buttons = shown.map((row, index) => [
-    { text: `放行 ${index + 1}`, callback_data: `release:${row.id}` },
-    { text: `屏蔽 ${index + 1}`, callback_data: `block:${row.userId}` },
+    { text: `✅ 放行 ${index + 1}`, callback_data: `release:${row.id}` },
+    { text: `🚫 屏蔽 ${index + 1}`, callback_data: `block:${row.userId}` },
   ]);
-  if (rows.length > PAGE) buttons.push([{ text: "下一页", callback_data: `filtered:${offset + PAGE}` }]);
+  if (rows.length > PAGE) buttons.push([{ text: "➡️ 下一页", callback_data: `filtered:${offset + PAGE}` }]);
   buttons.push(backRow());
-  return { text: `<b>隔离区</b>\n\n${fitLines(lines, "\n\n").text}`, keyboard: { inline_keyboard: buttons } };
+  return { text: `<b>🛡 隔离区</b>\n\n${fitLines(lines, "\n\n").text}`, keyboard: { inline_keyboard: buttons } };
 }
 
 type Page = { text: string; keyboard: { inline_keyboard: { text: string; callback_data: string }[][] } };
 
 function pagerRow(action: string, offset: number, more: boolean): { text: string; callback_data: string }[] {
   return [
-    ...(offset > 0 ? [{ text: "上一页", callback_data: `${action}:${Math.max(0, offset - PAGE)}` }] : []),
-    ...(more ? [{ text: "下一页", callback_data: `${action}:${offset + PAGE}` }] : []),
+    ...(offset > 0 ? [{ text: "⬅️ 上一页", callback_data: `${action}:${Math.max(0, offset - PAGE)}` }] : []),
+    ...(more ? [{ text: "➡️ 下一页", callback_data: `${action}:${offset + PAGE}` }] : []),
   ];
 }
 
@@ -139,9 +139,9 @@ export async function renderBlocked(app: App, offset: number): Promise<Page> {
   const rows = await app.db.prepare("SELECT * FROM contacts WHERE blocked_at IS NOT NULL ORDER BY blocked_at DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
   const shown = rows.slice(0, PAGE).map(toContact);
   if (shown.length === 0) return { text: "没有屏蔽任何人。", keyboard: { inline_keyboard: [backRow()] } };
-  const buttons = shown.map((contact) => [{ text: `解除屏蔽：${fullName(contact)}`.slice(0, 40), callback_data: `ubl:${contact.userId}` }]);
+  const buttons = shown.map((contact) => [{ text: `✅ 解除屏蔽：${fullName(contact)}`.slice(0, 40), callback_data: `ubl:${contact.userId}` }]);
   const pager = pagerRow("bk", offset, rows.length > PAGE);
-  return { text: `<b>已屏蔽</b>\n\n${shown.map(identityHtml).join("\n")}`, keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), backRow()] } };
+  return { text: `<b>🚫 已屏蔽</b>\n\n${shown.map(identityHtml).join("\n")}`, keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), backRow()] } };
 }
 
 export async function renderQuick(app: App, offset: number): Promise<Page> {
@@ -151,8 +151,8 @@ export async function renderQuick(app: App, offset: number): Promise<Page> {
   const pager = pagerRow("qm", offset, rows.length > PAGE);
   const list = fitLines(shown.map((row) => `<b>${clipHtml(str(row.name), 60)}</b>：${clipHtml(str(row.body), 80)}`), "\n").text;
   return {
-    text: shown.length ? `<b>快捷回复</b>\n点名字查看或删除。要发给别人，点联系人卡片上的「快捷回复」。\n\n${list}` : "<b>快捷回复</b>\n还没有。添加常用的话，回复时点一下就能发。",
-    keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), [{ text: "添加", callback_data: "qa" }], backRow()] },
+    text: shown.length ? `<b>⚡️ 快捷回复</b>\n点名字查看或删除。要发给别人，点联系人卡片上的「快捷回复」。\n\n${list}` : "<b>⚡️ 快捷回复</b>\n还没有。添加常用的话，回复时点一下就能发。",
+    keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), [{ text: "➕ 添加", callback_data: "qa" }], backRow()] },
   };
 }
 
@@ -163,8 +163,8 @@ export async function renderRules(app: App, offset: number): Promise<Page> {
   const pager = pagerRow("rl", offset, rows.length > PAGE);
   const list = fitLines(shown.map((row) => `${num(row.id)}. ${clipHtml(str(row.keywords), 80)} → ${clipHtml(str(row.reply), 60)}（命中 ${num(row.hits)}）`), "\n", 3500).text;
   return {
-    text: `<b>关键词自动回复</b>\n别人的消息里出现这些词时，机器人自动回复。\n\n${shown.length ? list : "还没有。"}`,
-    keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), [{ text: "添加", callback_data: "ra" }], backRow()] },
+    text: `<b>🤖 关键词自动回复</b>\n别人的消息里出现这些词时，机器人自动回复。\n\n${shown.length ? list : "还没有。"}`,
+    keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), [{ text: "➕ 添加", callback_data: "ra" }], backRow()] },
   };
 }
 
@@ -175,7 +175,7 @@ export async function cleanupPage(app: App): Promise<Page> {
     keyboard: {
       inline_keyboard: [
         [{ text: "30 天前", callback_data: "clean?:30" }, { text: "90 天前", callback_data: "clean?:90" }, { text: "180 天前", callback_data: "clean?:180" }],
-        [{ text: "全部", callback_data: "clean?:0" }, { text: "返回面板", callback_data: "p:main" }],
+        [{ text: "🧹 全部", callback_data: "clean?:0" }, { text: "🏠 返回首页", callback_data: "p:main" }],
       ],
     },
   };
@@ -290,7 +290,7 @@ async function cmdBroadcast(app: App, message: Message, args: string): Promise<v
 export async function offerBroadcast(app: App, message: Message, sourceId: number): Promise<void> {
   const running = await app.db.prepare("SELECT id FROM broadcasts WHERE state = 'running' LIMIT 1").first();
   if (running) {
-    await say(app, message, "上一次群发还没结束。", { inline_keyboard: [[{ text: "取消这次群发", callback_data: "bcx" }]] });
+    await say(app, message, "上一次群发还没结束。", { inline_keyboard: [[{ text: "🛑 取消这次群发", callback_data: "bcx" }]] });
     return;
   }
   const count = await app.db.prepare("SELECT COUNT(*) AS n FROM contacts WHERE blocked_at IS NULL AND unreachable_at IS NULL AND msg_count > 0").first<{ n: unknown }>();
@@ -300,7 +300,7 @@ export async function offerBroadcast(app: App, message: Message, sourceId: numbe
     .bind(message.chat.id, sourceId, message.chat.id, total, app.now())
     .first<{ id: unknown }>();
   await say(app, message, `要把这条消息发给 ${total} 个联系人吗？已屏蔽和不可达的不发。`, {
-    inline_keyboard: [[{ text: `确认发给 ${total} 人`, callback_data: `bc_go:${num(row?.id)}` }, { text: "取消", callback_data: `bc_no:${num(row?.id)}` }]],
+    inline_keyboard: [[{ text: `✅ 确认发给 ${total} 人`, callback_data: `bc_go:${num(row?.id)}` }, { text: "❌ 取消", callback_data: `bc_no:${num(row?.id)}` }]],
   });
 }
 
@@ -331,7 +331,7 @@ export async function searchContacts(app: App, message: Message, query: string):
     .bind(query, pattern, pattern, pattern, pattern)
     .all();
   if (rows.length === 0) {
-    await say(app, message, "没找到。", { inline_keyboard: [[{ text: "再搜一次", callback_data: "srch" }], backRow()] });
+    await say(app, message, "没找到。", { inline_keyboard: [[{ text: "🔍 再搜一次", callback_data: "srch" }], backRow()] });
     return;
   }
   for (const row of rows) await sendContactCard(app, message, toContact(row));

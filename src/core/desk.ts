@@ -36,28 +36,28 @@ export function contactKeyboard(contact: Contact, selected: boolean, inTopic: bo
   if (!inTopic) {
     rows.push([
       selected
-        ? { text: "取消选中", callback_data: `unselect:${contact.userId}` }
-        : { text: "选中，直接回复", callback_data: `select:${contact.userId}` },
-      { text: "聊天记录", callback_data: `history:${contact.userId}:0` },
+        ? { text: "⬜️ 取消选中", callback_data: `unselect:${contact.userId}` }
+        : { text: "✍️ 选中，直接回复", callback_data: `select:${contact.userId}` },
+      { text: "📜 聊天记录", callback_data: `history:${contact.userId}:0` },
     ]);
   } else {
-    rows.push([{ text: "聊天记录", callback_data: `history:${contact.userId}:0` }]);
+    rows.push([{ text: "📜 聊天记录", callback_data: `history:${contact.userId}:0` }]);
   }
   rows.push([
-    { text: "快捷回复", callback_data: `qp:${contact.userId}` },
-    { text: "撤回上一条", callback_data: `undo:${contact.userId}` },
+    { text: "⚡️ 快捷回复", callback_data: `qp:${contact.userId}` },
+    { text: "↩️ 撤回上一条", callback_data: `undo:${contact.userId}` },
   ]);
   rows.push([
-    { text: contact.note ? "改备注" : "加备注", callback_data: `note:${contact.userId}` },
+    { text: contact.note ? "📝 改备注" : "📝 加备注", callback_data: `note:${contact.userId}` },
     contact.blockedAt === null
-      ? { text: "屏蔽", callback_data: `block:${contact.userId}` }
-      : { text: "解除屏蔽", callback_data: `unblock:${contact.userId}` },
+      ? { text: "🚫 屏蔽", callback_data: `block:${contact.userId}` }
+      : { text: "✅ 解除屏蔽", callback_data: `unblock:${contact.userId}` },
   ]);
   rows.push([
     contact.verifyExempt
-      ? { text: "恢复验证", callback_data: `unexempt:${contact.userId}` }
-      : { text: "免验证", callback_data: `exempt:${contact.userId}` },
-    ...(contact.lockedUntil !== null && contact.lockedUntil > 0 ? [{ text: "解除验证锁定", callback_data: `unlock:${contact.userId}` }] : []),
+      ? { text: "🔐 恢复验证", callback_data: `unexempt:${contact.userId}` }
+      : { text: "🎫 免验证", callback_data: `exempt:${contact.userId}` },
+    ...(contact.lockedUntil !== null && contact.lockedUntil > 0 ? [{ text: "🔓 解除验证锁定", callback_data: `unlock:${contact.userId}` }] : []),
   ]);
   return { inline_keyboard: rows };
 }

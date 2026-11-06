@@ -837,11 +837,18 @@ describe("管理面板：不打命令也能管理", () => {
 
   it("主人发 /start 看到面板，能点到全部管理功能", async () => {
     await h.fromOwner("/start");
-    const shown = labels(h.tg.last("sendMessage"));
-    for (const name of ["最近会话", "搜索联系人", "隔离区", "已屏蔽", "快捷回复", "统计", "关键词回复", "群发", "设置", "运行状态", "清理记录", "导出数据"]) {
-      expect(shown.join("、")).toContain(name);
-    }
+    const home = labels(h.tg.last("sendMessage")).join("、");
+    for (const name of ["最近会话", "搜索联系人", "快捷回复", "隔离区", "群发", "统计", "设置", "更多"]) expect(home).toContain(name);
     for (const button of buttons(h.tg.last("sendMessage"))) expect(new TextEncoder().encode(button.callback_data ?? "").length).toBeLessThanOrEqual(64);
+    await h.press(OWNER, OWNER, 1, "p:more");
+    const more = labels(h.tg.last("editMessageText")).join("、");
+    for (const name of ["关键词回复", "已屏蔽", "清理记录", "导出数据", "运行状态", "返回首页"]) expect(more).toContain(name);
+    expect(home).not.toContain("导出数据");
+  });
+
+  it("欢迎语从设置第一页就能改，不用再进一层", async () => {
+    await h.press(OWNER, OWNER, 1, "m:main");
+    expect(dataOf(h.tg.last("editMessageText"), "改欢迎语")).toBe("mi:welcome");
   });
 
   it("陌生人发 /start 看不到面板，按面板按钮也没有反应", async () => {
@@ -899,7 +906,7 @@ describe("管理面板：不打命令也能管理", () => {
   it("还没有快捷回复时，卡片上的按钮引导去添加", async () => {
     await h.fromUser(ALICE, "你好");
     await h.press(OWNER, OWNER, 1, `qp:${ALICE}`);
-    expect(labels(h.tg.last("sendMessage"))).toEqual(["添加快捷回复"]);
+    expect(labels(h.tg.last("sendMessage"))).toEqual(["➕ 添加快捷回复"]);
   });
 
   it("点按钮添加关键词回复，立刻生效，也能点按钮删除", async () => {
@@ -967,7 +974,7 @@ describe("管理面板：不打命令也能管理", () => {
     await h.fromUser(ALICE, "hi");
     await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
     await h.press(OWNER, OWNER, 1, "mi:welcome");
-    expect(labels(h.tg.last("sendMessage"))).toEqual(["取消"]);
+    expect(labels(h.tg.last("sendMessage"))).toEqual(["❌ 取消"]);
     await h.press(OWNER, OWNER, 9, "cancel");
     expect(String(h.tg.last("editMessageText").text)).toBe("已取消。");
     h.tg.reset();
@@ -998,7 +1005,7 @@ describe("管理面板：不打命令也能管理", () => {
   });
 
   it("每个页面都能回到面板", async () => {
-    for (const data of ["list:0", "filtered:0", "bk:0", "qm:0", "rl:0", "p:stats", "p:status", "p:help", "cl"]) {
+    for (const data of ["p:more", "list:0", "filtered:0", "bk:0", "qm:0", "rl:0", "p:stats", "p:status", "p:help", "cl"]) {
       await h.press(OWNER, OWNER, 1, data);
       expect(buttons(h.tg.last("editMessageText")).some((button) => button.callback_data === "p:main"), data).toBe(true);
     }
@@ -1045,9 +1052,10 @@ describe("管理面板：不打命令也能管理", () => {
       await h.fromGroup(7777, "/menu", null);
       const shown = labels(h.tg.last("sendMessage")).join("、");
       expect(shown).toContain("快捷回复");
-      for (const name of ["群发", "设置", "导出数据", "清理记录", "运行状态", "关键词回复"]) expect(shown).not.toContain(name);
+      for (const name of ["群发", "设置", "更多", "导出数据", "清理记录", "运行状态", "关键词回复"]) expect(shown).not.toContain(name);
+      expect(shown).toContain("已屏蔽");
       h.tg.reset();
-      for (const data of ["ex", "bc", "bcx", "cl", "rl:0", "ra", "rd:1", "p:status"]) {
+      for (const data of ["ex", "bc", "bcx", "cl", "rl:0", "ra", "rd:1", "p:status", "p:more"]) {
         await h.press(7777, GROUP, 1, data);
       }
       expect(h.tg.named("sendDocument")).toHaveLength(0);

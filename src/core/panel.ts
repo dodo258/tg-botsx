@@ -17,7 +17,7 @@ import {
 } from "./commands.ts";
 import { getContact, identityHtml } from "./contacts.ts";
 import { num, str } from "./db.ts";
-import { backRow, CANCEL_KEYBOARD, clearAwaiting, currentAwaiting, handleAwaitingInput, renderPanel, setAwaiting } from "./menus.ts";
+import { backRow, CANCEL_KEYBOARD, clearAwaiting, currentAwaiting, handleAwaitingInput, renderMore, renderPanel, setAwaiting } from "./menus.ts";
 import { clipHtml, escapeHtml, kindLabel } from "./message-info.ts";
 import { findById, toMessage } from "./messages.ts";
 import { retract } from "./sync.ts";
@@ -91,6 +91,11 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
         if (!owner) return await ctx.answer("只有主人能操作。", true);
         return await edit(ctx, await statusText(app), { inline_keyboard: [backRow()] });
       }
+      if (arg === "more") {
+        if (!owner) return await ctx.answer("只有主人能操作。", true);
+        const more = renderMore();
+        return await edit(ctx, more.text, more.keyboard);
+      }
       const panel = await renderPanel(app, owner);
       return await edit(ctx, panel.text, panel.keyboard);
     }
@@ -108,7 +113,7 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       const quick = rowId === null ? null : await quickById(app, rowId);
       if (!quick) return await ctx.answer("这条快捷回复已经没有了。", true);
       return await edit(ctx, `<b>${clipHtml(str(quick.name), 60)}</b>\n\n${clipHtml(str(quick.body), 3000)}`, {
-        inline_keyboard: [[{ text: "删除", callback_data: `qd:${rowId}` }, { text: "返回", callback_data: "qm:0" }]],
+        inline_keyboard: [[{ text: "🗑 删除", callback_data: `qd:${rowId}` }, { text: "⬅️ 返回", callback_data: "qm:0" }]],
       });
     }
     case "qd": {
@@ -125,9 +130,9 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       const contact = userId === null ? null : await getContact(app, userId);
       if (!contact) return await ctx.answer("联系人不存在。", true);
       const rows = await app.db.prepare("SELECT rowid AS id, name FROM quick_replies ORDER BY name LIMIT 30").all<{ id: unknown; name: unknown }>();
-      if (rows.length === 0) return await send(ctx, "还没有快捷回复，先添加一条。", { inline_keyboard: [[{ text: "添加快捷回复", callback_data: "qa" }]] });
+      if (rows.length === 0) return await send(ctx, "还没有快捷回复，先添加一条。", { inline_keyboard: [[{ text: "➕ 添加快捷回复", callback_data: "qa" }]] });
       const buttons = rows.map((row) => [{ text: str(row.name).slice(0, 40), callback_data: `qs:${contact.userId}:${num(row.id)}` }]);
-      return await send(ctx, `选一条发给 ${identityHtml(contact)}：`, { inline_keyboard: [...buttons, [{ text: "取消", callback_data: "dismiss" }]] });
+      return await send(ctx, `选一条发给 ${identityHtml(contact)}：`, { inline_keyboard: [...buttons, [{ text: "❌ 取消", callback_data: "dismiss" }]] });
     }
     case "qs": {
       const userId = id(arg);
@@ -149,7 +154,7 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       const rule = ruleId === null ? null : await app.db.prepare("SELECT * FROM auto_rules WHERE id = ?").bind(ruleId).first();
       if (!rule) return await ctx.answer("这条规则已经没有了。", true);
       return await edit(ctx, `<b>关键词</b>：${clipHtml(str(rule.keywords), 500)}\n<b>自动回复</b>：${clipHtml(str(rule.reply), 2500)}\n命中 ${num(rule.hits)} 次`, {
-        inline_keyboard: [[{ text: "删除", callback_data: `rd:${ruleId}` }, { text: "返回", callback_data: "rl:0" }]],
+        inline_keyboard: [[{ text: "🗑 删除", callback_data: `rd:${ruleId}` }, { text: "⬅️ 返回", callback_data: "rl:0" }]],
       });
     }
     case "rd": {
@@ -182,7 +187,7 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       if (!row) return await ctx.answer("没有可以撤回的消息。", true);
       const last = toMessage(row);
       return await send(ctx, `撤回发给对方的最后一条消息？\n\n${clipHtml(last.text ?? `[${kindLabel(last.kind)}]`, 800)}`, {
-        inline_keyboard: [[{ text: "确认撤回", callback_data: `undo!:${last.id}` }, { text: "取消", callback_data: "dismiss" }]],
+        inline_keyboard: [[{ text: "↩️ 确认撤回", callback_data: `undo!:${last.id}` }, { text: "❌ 取消", callback_data: "dismiss" }]],
       });
     }
     case "undo!": {
@@ -195,7 +200,7 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
     // ---------- 主人 ----------
     case "bc": {
       const running = await app.db.prepare("SELECT id FROM broadcasts WHERE state = 'running' LIMIT 1").first();
-      if (running) return await edit(ctx, "上一次群发还没结束。", { inline_keyboard: [[{ text: "取消这次群发", callback_data: "bcx" }], backRow()] });
+      if (running) return await edit(ctx, "上一次群发还没结束。", { inline_keyboard: [[{ text: "🛑 取消这次群发", callback_data: "bcx" }], backRow()] });
       return await ask(ctx, "p:broadcast", "把要群发的内容发给我，文字、图片、文件都可以，一次一条。发完会先问你确认，不会马上发出去。");
     }
     case "bcx": {
@@ -265,7 +270,7 @@ export async function handleInput(app: App, message: Message, staffId: number): 
       .bind(awaiting.slice("p:qbody:".length), text, app.now())
       .run();
     await clearAwaiting(app, staffId);
-    await reply("已保存。", { inline_keyboard: [[{ text: "返回快捷回复", callback_data: "qm:0" }]] });
+    await reply("已保存。", { inline_keyboard: [[{ text: "⚡️ 返回快捷回复", callback_data: "qm:0" }]] });
     return true;
   }
   if (awaiting === "p:rkeys") {
@@ -284,7 +289,7 @@ export async function handleInput(app: App, message: Message, staffId: number): 
     }
     await app.db.prepare("INSERT INTO auto_rules(keywords, reply, created_at) VALUES(?, ?, ?)").bind(awaiting.slice("p:rbody:".length), text, app.now()).run();
     await clearAwaiting(app, staffId);
-    await reply("已添加。", { inline_keyboard: [[{ text: "返回关键词回复", callback_data: "rl:0" }]] });
+    await reply("已添加。", { inline_keyboard: [[{ text: "🤖 返回关键词回复", callback_data: "rl:0" }]] });
     return true;
   }
   await clearAwaiting(app, staffId);

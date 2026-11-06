@@ -193,7 +193,7 @@ main() {
   show_claim
   step "装好了"
   say "以后管理机器人运行：$MANAGE"
-  say "设置在 Telegram 里给机器人发 /settings。"
+  say "其他操作都在 Telegram 里：给机器人发 /start 打开管理面板，点按钮就行。"
 }
 
 main "$@"

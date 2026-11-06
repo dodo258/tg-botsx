@@ -165,7 +165,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       const id = positiveInt(arg);
       if (id === null) return false;
       const changed = await app.db.prepare("UPDATE broadcasts SET state = 'running' WHERE id = ? AND state = 'draft'").bind(id).run();
-      await edit(ctx, changed ? "开始群发，每分钟发一批，完成后告诉你。" : "这次群发已经处理过了。", changed ? { inline_keyboard: [[{ text: "取消群发", callback_data: "bcx" }]] } : undefined);
+      await edit(ctx, changed ? "开始群发，每分钟发一批，完成后告诉你。" : "这次群发已经处理过了。", changed ? { inline_keyboard: [[{ text: "🛑 取消群发", callback_data: "bcx" }]] } : undefined);
       if (changed) app.defer(() => broadcastTick(app), 0);
       return true;
     }
@@ -182,7 +182,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       const cutoff = days === 0 ? app.now() + 1 : app.now() - days * 86_400;
       const row = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE created_at < ? AND (text IS NOT NULL OR file_id IS NOT NULL)").bind(cutoff).first<{ n: unknown }>();
       await edit(ctx, `会抹掉${days === 0 ? "全部" : ` ${days} 天前的`} ${num(row?.n)} 条记录的内容，不能恢复。\n联系人和回复关系保留。`, {
-        inline_keyboard: [[{ text: `确认清理 ${num(row?.n)} 条`, callback_data: `clean!:${days}` }, { text: "取消", callback_data: "cl" }]],
+        inline_keyboard: [[{ text: `🧹 确认清理 ${num(row?.n)} 条`, callback_data: `clean!:${days}` }, { text: "❌ 取消", callback_data: "cl" }]],
       });
       return true;
     }
@@ -241,7 +241,7 @@ async function staffAction(ctx: Ctx, action: string, arg: string, extra: string 
       await app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(userId).run();
       contact.unread = 0;
       return await edit(ctx, cardText(app, contact), {
-        inline_keyboard: [...contactKeyboard(contact, (await selectedUser(app, query.from.id)) === userId, usesThreads(app)).inline_keyboard, [{ text: "返回列表", callback_data: "list:0" }]],
+        inline_keyboard: [...contactKeyboard(contact, (await selectedUser(app, query.from.id)) === userId, usesThreads(app)).inline_keyboard, [{ text: "⬅️ 返回列表", callback_data: "list:0" }]],
       });
     case "history": {
       const page = await renderHistory(app, userId, positiveInt(extra) ?? 0);

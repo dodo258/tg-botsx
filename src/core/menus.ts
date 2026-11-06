@@ -13,12 +13,13 @@ export interface Menu {
 }
 
 const onOff = (value: boolean) => (value ? "开" : "关");
-const BACK: Button[] = [{ text: "返回", callback_data: "m:main" }];
+const BACK: Button[] = [{ text: "⬅️ 返回设置", callback_data: "m:main" }];
+const toggle = (on: boolean, label: string) => `${on ? "✅" : "⬜️"} ${label}`;
 
-export const backRow = () => [{ text: "返回面板", callback_data: "p:main" }];
-export const CANCEL_KEYBOARD = { inline_keyboard: [[{ text: "取消", callback_data: "cancel" }]] };
+export const backRow = () => [{ text: "🏠 返回首页", callback_data: "p:main" }];
+export const CANCEL_KEYBOARD = { inline_keyboard: [[{ text: "❌ 取消", callback_data: "cancel" }]] };
 
-/** 管理面板：不会打命令也能管理机器人的入口。计数写在按钮上，一眼看到哪里有事。 */
+/** 面板首页：只放每天都用的，计数写在按钮上，一眼看到哪里有事。不常用的收进「更多」。 */
 export async function renderPanel(app: App, owner: boolean): Promise<Menu> {
   const counts = await app.db
     .prepare("SELECT (SELECT COUNT(*) FROM contacts WHERE unread > 0) AS unread, (SELECT COUNT(*) FROM messages WHERE status = 'filtered') AS filtered")
@@ -26,21 +27,36 @@ export async function renderPanel(app: App, owner: boolean): Promise<Menu> {
   const unread = num(counts?.unread);
   const filtered = num(counts?.filtered);
   const rows: Button[][] = [
-    [{ text: unread > 0 ? `最近会话（${unread} 人未读）` : "最近会话", callback_data: "list:0" }, { text: "搜索联系人", callback_data: "srch" }],
-    [{ text: filtered > 0 ? `隔离区（${filtered}）` : "隔离区", callback_data: "filtered:0" }, { text: "已屏蔽", callback_data: "bk:0" }],
-    [{ text: "快捷回复", callback_data: "qm:0" }, { text: "统计", callback_data: "p:stats" }],
+    [{ text: unread > 0 ? `💬 最近会话（${unread} 人未读）` : "💬 最近会话", callback_data: "list:0" }, { text: "🔍 搜索联系人", callback_data: "srch" }],
+    [{ text: "⚡️ 快捷回复", callback_data: "qm:0" }, { text: filtered > 0 ? `🛡 隔离区（${filtered}）` : "🛡 隔离区", callback_data: "filtered:0" }],
   ];
   if (owner) {
     rows.push(
-      [{ text: "关键词回复", callback_data: "rl:0" }, { text: "群发", callback_data: "bc" }],
-      [{ text: "设置", callback_data: "m:main" }, { text: "运行状态", callback_data: "p:status" }],
-      [{ text: "清理记录", callback_data: "cl" }, { text: "导出数据", callback_data: "ex" }],
+      [{ text: "📢 群发", callback_data: "bc" }, { text: "📊 统计", callback_data: "p:stats" }],
+      [{ text: "⚙️ 设置", callback_data: "m:main" }, { text: "📂 更多", callback_data: "p:more" }],
     );
+  } else {
+    // 同事的「更多」里只会剩一个，不值得多点一下
+    rows.push([{ text: "🚫 已屏蔽", callback_data: "bk:0" }, { text: "📊 统计", callback_data: "p:stats" }]);
   }
-  rows.push([{ text: "怎么回复消息", callback_data: "p:help" }]);
+  rows.push([{ text: "❓ 怎么回复消息", callback_data: "p:help" }]);
   return {
-    text: "<b>管理面板</b>\n点下面的按钮操作。\n\n回复别人：直接回复转来的那条消息就行，对方看不到你的账号。",
+    text: "<b>🏠 管理面板</b>\n点下面的按钮操作。\n\n回复别人：直接回复转来的那条消息就行，对方看不到你的账号。",
     keyboard: { inline_keyboard: rows },
+  };
+}
+
+export function renderMore(): Menu {
+  return {
+    text: "<b>📂 更多</b>",
+    keyboard: {
+      inline_keyboard: [
+        [{ text: "🤖 关键词回复", callback_data: "rl:0" }, { text: "🚫 已屏蔽", callback_data: "bk:0" }],
+        [{ text: "🧹 清理记录", callback_data: "cl" }, { text: "📦 导出数据", callback_data: "ex" }],
+        [{ text: "🟢 运行状态", callback_data: "p:status" }],
+        backRow(),
+      ],
+    },
   };
 }
 
@@ -56,15 +72,15 @@ export function renderMenu(app: App, page: string): Menu {
     case "desk":
       return {
         text:
-          `<b>消息收在哪</b>\n当前：${deskModeLabel(s)}\n\n` +
+          `<b>📥 消息收在哪</b>\n当前：${deskModeLabel(s)}\n\n` +
           "<b>私聊卡片</b>：什么都不用配，消息都到你和机器人的私聊里。\n" +
           "<b>话题群</b>：每个联系人一个话题，可以拉同事一起回复。先建一个开了话题的超级群，再点下面的按钮选这个群，给机器人管理员权限后会自动绑定。没有自动绑定的话，在群里发 /bindgroup。\n" +
           "<b>私聊话题</b>：不用建群也有话题，需要先在 @BotFather 的 Mini App 里打开话题模式。这个开关是机器人全局的，普通用户的聊天界面也可能变化，所以算实验功能。",
         keyboard: {
           inline_keyboard: [
-            [{ text: s.deskMode === "dm" ? "✓ 私聊卡片" : "私聊卡片", callback_data: "mc:deskMode:dm" }],
-            [{ text: s.deskMode === "dm_topics" ? "✓ 私聊话题（实验）" : "私聊话题（实验）", callback_data: "mc:deskMode:dm_topics" }],
-            ...(s.botUsername ? [[{ text: s.deskMode === "group" ? "✓ 话题群（换一个群）" : "绑定话题群", url: `https://t.me/${s.botUsername}?startgroup=bind&admin=manage_topics` }]] : []),
+            [{ text: s.deskMode === "dm" ? "✅ 私聊卡片" : "💬 私聊卡片", callback_data: "mc:deskMode:dm" }],
+            [{ text: s.deskMode === "dm_topics" ? "✅ 私聊话题（实验）" : "🧪 私聊话题（实验）", callback_data: "mc:deskMode:dm_topics" }],
+            ...(s.botUsername ? [[{ text: s.deskMode === "group" ? "✅ 话题群（换一个群）" : "👥 绑定话题群", url: `https://t.me/${s.botUsername}?startgroup=bind&admin=manage_topics` }]] : []),
             BACK,
           ],
         },
@@ -72,13 +88,13 @@ export function renderMenu(app: App, page: string): Menu {
     case "verify":
       return {
         text:
-          "<b>人机验证</b>\n陌生人第一次发消息要答一道题，验证前发的消息会暂存，通过后自动转给你。\n\n" +
+          "<b>🔐 人机验证</b>\n陌生人第一次发消息要答一道题，验证前发的消息会暂存，通过后自动转给你。\n\n" +
           `状态：${s.verifyMode === "quiz" ? "开" : "关"}\n` +
           `有效期：${s.verifyTtlDays === 0 ? "通过一次永久有效" : `${s.verifyTtlDays} 天`}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: s.verifyMode === "quiz" ? "关闭验证" : "打开验证", callback_data: "mc:verifyMode:" + (s.verifyMode === "quiz" ? "off" : "quiz") }],
-            [{ text: "改有效期", callback_data: "mi:verifyTtlDays" }],
+            [{ text: s.verifyMode === "quiz" ? "⬜️ 关闭验证" : "✅ 打开验证", callback_data: "mc:verifyMode:" + (s.verifyMode === "quiz" ? "off" : "quiz") }],
+            [{ text: "⏳ 改有效期", callback_data: "mi:verifyTtlDays" }],
             BACK,
           ],
         },
@@ -86,17 +102,17 @@ export function renderMenu(app: App, page: string): Menu {
     case "auto":
       return {
         text:
-          "<b>自动回复</b>\n\n" +
+          "<b>💬 自动回复</b>\n\n" +
           `<b>欢迎语</b>（/start 时发送）：\n${clipHtml(s.welcome, 900)}\n\n` +
           `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：\n${clipHtml(s.receipt, 900)}\n\n` +
           `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${clipHtml(s.offlineMessage, 900)}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "改欢迎语", callback_data: "mi:welcome" }],
-            [{ text: `收到回执：${onOff(s.receiptEnabled)}`, callback_data: "mt:receiptEnabled" }, { text: "改回执文字", callback_data: "mi:receipt" }],
-            [{ text: `离线回复：${onOff(s.offlineEnabled)}`, callback_data: "mt:offlineEnabled" }, { text: "改离线文字", callback_data: "mi:offlineMessage" }],
-            [{ text: "改在线时段", callback_data: "mi:onlineHours" }, { text: "改时区", callback_data: "mi:timezone" }],
-            [{ text: "关键词回复", callback_data: "rl:0" }],
+            [{ text: "👋 改欢迎语", callback_data: "mi:welcome" }],
+            [{ text: toggle(s.receiptEnabled, "收到回执"), callback_data: "mt:receiptEnabled" }, { text: "✏️ 改回执文字", callback_data: "mi:receipt" }],
+            [{ text: toggle(s.offlineEnabled, "离线回复"), callback_data: "mt:offlineEnabled" }, { text: "✏️ 改离线文字", callback_data: "mi:offlineMessage" }],
+            [{ text: "🕘 改在线时段", callback_data: "mi:onlineHours" }, { text: "🌏 改时区", callback_data: "mi:timezone" }],
+            [{ text: "🤖 关键词回复", callback_data: "rl:0" }],
             BACK,
           ],
         },
@@ -104,7 +120,7 @@ export function renderMenu(app: App, page: string): Menu {
     case "filter":
       return {
         text:
-          "<b>防骚扰</b>\n命中规则的消息进隔离区，不会丢，可以查看和放行。\n\n" +
+          "<b>🛡 防骚扰</b>\n命中规则的消息进隔离区，不会丢，可以查看和放行。\n\n" +
           `屏蔽关键词：${s.blockedKeywords.length ? clipHtml(s.blockedKeywords.join("、"), 2500) : "无"}\n` +
           `新联系人发链接进隔离：${onOff(s.blockLinksForNew)}\n` +
           `转发内容进隔离：${onOff(s.blockForwards)}\n` +
@@ -113,11 +129,11 @@ export function renderMenu(app: App, page: string): Menu {
           `防轰炸阈值：10 分钟新增 ${s.floodThreshold} 人`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "改屏蔽关键词", callback_data: "mi:blockedKeywords" }],
-            [{ text: `发链接：${onOff(s.blockLinksForNew)}`, callback_data: "mt:blockLinksForNew" }, { text: `转发：${onOff(s.blockForwards)}`, callback_data: "mt:blockForwards" }],
-            [{ text: `先审核：${onOff(s.reviewNewContacts)}`, callback_data: "mt:reviewNewContacts" }],
-            [{ text: "改每分钟上限", callback_data: "mi:messagesPerMinute" }, { text: "改防轰炸阈值", callback_data: "mi:floodThreshold" }],
-            [{ text: "打开隔离区", callback_data: "filtered:0" }],
+            [{ text: "🚫 改屏蔽关键词", callback_data: "mi:blockedKeywords" }],
+            [{ text: toggle(s.blockLinksForNew, "新人发链接拦截"), callback_data: "mt:blockLinksForNew" }, { text: toggle(s.blockForwards, "转发内容拦截"), callback_data: "mt:blockForwards" }],
+            [{ text: toggle(s.reviewNewContacts, "新人先审核"), callback_data: "mt:reviewNewContacts" }],
+            [{ text: "⏱ 改每分钟上限", callback_data: "mi:messagesPerMinute" }, { text: "🌊 改防轰炸阈值", callback_data: "mi:floodThreshold" }],
+            [{ text: "🛡 打开隔离区", callback_data: "filtered:0" }],
             BACK,
           ],
         },
@@ -125,25 +141,25 @@ export function renderMenu(app: App, page: string): Menu {
     case "data":
       return {
         text:
-          "<b>数据</b>\n\n" +
+          "<b>🗄 数据</b>\n\n" +
           `聊天内容保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}\n` +
           "到期后抹掉文字和文件编号，联系人和回复关系还在，老消息依然能回复。",
         keyboard: {
           inline_keyboard: [
-            [{ text: "改保留天数", callback_data: "mi:retentionDays" }],
-            [{ text: "手动清理", callback_data: "cl" }, { text: "导出数据", callback_data: "ex" }],
+            [{ text: "🗓 改保留天数", callback_data: "mi:retentionDays" }],
+            [{ text: "🧹 手动清理", callback_data: "cl" }, { text: "📦 导出数据", callback_data: "ex" }],
             BACK,
           ],
         },
       };
     default:
       return {
-        text: `<b>设置</b>\n\n消息收在：${deskModeLabel(s)}\n人机验证：${s.verifyMode === "quiz" ? "开" : "关"}\n聊天保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}`,
+        text: `<b>⚙️ 设置</b>\n\n消息收在：${deskModeLabel(s)}\n人机验证：${s.verifyMode === "quiz" ? "开" : "关"}\n聊天保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "消息收在哪", callback_data: "m:desk" }, { text: "人机验证", callback_data: "m:verify" }],
-            [{ text: "自动回复", callback_data: "m:auto" }, { text: "防骚扰", callback_data: "m:filter" }],
-            [{ text: "数据", callback_data: "m:data" }],
+            [{ text: "👋 改欢迎语", callback_data: "mi:welcome" }, { text: "💬 自动回复", callback_data: "m:auto" }],
+            [{ text: "🔐 人机验证", callback_data: "m:verify" }, { text: "🛡 防骚扰", callback_data: "m:filter" }],
+            [{ text: "📥 消息收在哪", callback_data: "m:desk" }, { text: "🗄 数据", callback_data: "m:data" }],
             backRow(),
           ],
         },
@@ -302,6 +318,6 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
     return true;
   }
   await clearAwaiting(app, staffId);
-  await reply("已保存。", { inline_keyboard: [[{ text: "返回设置", callback_data: "m:main" }]] });
+  await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回设置", callback_data: "m:main" }]] });
   return true;
 }
