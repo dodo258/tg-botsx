@@ -501,22 +501,24 @@ describe("自动回复", () => {
     const receipts = () => h.tg.textsTo(ALICE).filter((text) => text === h.app.settings.receipt).length;
     await h.fromUser(ALICE, "1");
     await h.fromUser(ALICE, "2");
-    expect(receipts()).toBe(1);
+    // 第一次回的是自动回复，不再多回一句「已收到」
+    expect(h.tg.textsTo(ALICE)).toEqual([h.app.settings.welcome]);
+    expect(receipts()).toBe(0);
     expect(h.tg.named("setMessageReaction").filter((params) => params.chat_id === ALICE)).toHaveLength(2);
     await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(ALICE).run();
     h.clock.now += 29 * 86_400;
     await h.fromUser(ALICE, "3");
-    expect(receipts()).toBe(1);
+    expect(receipts()).toBe(0);
     await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(ALICE).run();
     h.clock.now += 86_400 + 1;
     await h.fromUser(ALICE, "4");
-    expect(receipts()).toBe(2);
+    expect(receipts()).toBe(1);
   });
 
-  it("关了回执，不打 👌 也不发文字", async () => {
+  it("关了回执，不打 👌 也不发「已收到」，第一次的自动回复还在", async () => {
     await h.set("receiptEnabled", false);
     await h.fromUser(ALICE, "1");
-    expect(h.tg.textsTo(ALICE)).toEqual([]);
+    expect(h.tg.textsTo(ALICE)).toEqual([h.app.settings.welcome]);
     expect(h.tg.named("setMessageReaction")).toHaveLength(0);
   });
 
@@ -524,7 +526,7 @@ describe("自动回复", () => {
     h.tg.failNext("setMessageReaction", 400, "Bad Request: REACTION_INVALID");
     await h.fromUser(ALICE, "1");
     expect(h.tg.named("copyMessage").length).toBe(1);
-    expect(h.tg.textsTo(ALICE)).toContain(h.app.settings.receipt);
+    expect(h.tg.textsTo(ALICE)).toContain(h.app.settings.welcome);
   });
 
   it("回复别人：有未读的排最前，点名字选中后有明确提示，首页显示正在回复谁", async () => {
@@ -559,9 +561,12 @@ describe("自动回复", () => {
 
   it("收到回执：只在一波消息的第一条发，冷却期内不重复", async () => {
     await h.fromUser(ALICE, "1");
-    await h.fromUser(ALICE, "2");
     await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(ALICE).run();
+    h.clock.now += 31 * 86_400;
+    await h.fromUser(ALICE, "2");
     await h.fromUser(ALICE, "3");
+    await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(ALICE).run();
+    await h.fromUser(ALICE, "4");
     expect(h.tg.textsTo(ALICE).filter((text) => text === h.app.settings.receipt)).toHaveLength(1);
   });
 
@@ -1678,6 +1683,28 @@ describe("空档期和通知失败", () => {
 describe("第一次的自动回复", () => {
   beforeEach(async () => {
     h = await makeHarness({ verify: false });
+  });
+
+  it("没点开始直接发消息，也算第一次：回一次，消息照常转过去", async () => {
+    await h.set("welcome", "你好，有事留言");
+    await h.fromUser(ALICE, "直接发的");
+    expect(h.tg.textsTo(ALICE)).toEqual(["你好，有事留言"]);
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === OWNER)).toBe(true);
+    await h.app.db.prepare("UPDATE contacts SET unread = 0").run();
+    await h.fromUser(ALICE, "第二句");
+    expect(h.tg.textsTo(ALICE)).toEqual(["你好，有事留言"]);
+  });
+
+  it("开着验证时直接发消息：先回自动回复，再出题，答对才转", async () => {
+    h = await makeHarness();
+    await h.set("welcome", "你好，有事留言");
+    await h.fromUser(ALICE, "直接发的");
+    const texts = h.tg.textsTo(ALICE);
+    expect(texts[0]).toBe("你好，有事留言");
+    expect(texts[1]).toContain("答一道题");
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    await h.fromUser(ALICE, "再发一句");
+    expect(h.tg.textsTo(ALICE).filter((text) => text === "你好，有事留言")).toHaveLength(1);
   });
 
   it("只有文字：点开始时回一次，之后的消息不再回文字，只打 👌", async () => {

@@ -112,6 +112,8 @@ async function sendWelcome(app: App, contact: Contact): Promise<void> {
   const text = app.settings.welcome;
   const chat = contact.userId;
   await app.db.prepare("UPDATE contacts SET last_receipt_at = ? WHERE user_id = ?").bind(app.now(), chat).run();
+  // 这条消息接下来的自动回复判断要看到它，否则同一条消息还会再回一句「已收到」
+  contact.lastReceiptAt = app.now();
   const fits = text.length <= CAPTION_LIMIT;
   const caption = fits && text ? { caption: text } : {};
   let photoSent = false;
@@ -124,7 +126,7 @@ async function sendWelcome(app: App, contact: Contact): Promise<void> {
         const asset = await app.db.prepare("SELECT mime, data FROM assets WHERE name = 'welcome'").first<{ mime: unknown; data: unknown }>();
         if (asset) {
           const bytes = new Uint8Array(Buffer.from(str(asset.data), "base64"));
-          const sent = await app.tg.upload<{ photo?: { file_id: string }[] }>("sendPhoto", { chat_id: chat, ...caption }, "photo", bytes, "welcome", str(asset.mime));
+          const sent = await app.tg.upload<{ photo?: { file_id: string }[] }>("sendPhoto", { chat_id: chat, ...caption }, "photo", bytes, `welcome.${str(asset.mime).split("/")[1] ?? "jpg"}`, str(asset.mime));
           photoSent = true;
           // 记下文件编号，之后不用每次都上传
           const fileId = sent.photo?.at(-1)?.file_id;
@@ -282,6 +284,8 @@ export async function handleContactMessage(app: App, message: Message, user: Use
   if (contact.mutedUntil !== null && contact.mutedUntil > app.now()) return;
 
   const info = describe(message);
+  // 第一次的自动回复不能只绑在「开始」上：聊过的账号看不到开始按钮，直接发消息就是第一次
+  const firstTime = contact.lastReceiptAt === null;
   if (needsVerification(app, contact)) {
     if (contact.lockedUntil !== null && contact.lockedUntil > app.now()) {
       if (isStart) await app.tg.call("sendMessage", { chat_id: user.id, text: "验证失败次数太多，请过一会儿再试。" });
@@ -290,7 +294,7 @@ export async function handleContactMessage(app: App, message: Message, user: Use
     if (!isStart) await holdForVerification(app, contact, message, info);
     // 对方清空聊天后点开始，旧题已经看不到了，要重发
     if (!challengePending(app, contact) || isStart) {
-      if (isStart) await sendWelcome(app, contact);
+      if (isStart || firstTime) await sendWelcome(app, contact);
       await sendChallenge(app, contact);
     }
     return;
@@ -301,6 +305,7 @@ export async function handleContactMessage(app: App, message: Message, user: Use
     await sendWelcome(app, contact);
     return;
   }
+  if (firstTime) await sendWelcome(app, contact);
   if (!(await consumeRate(app, contact))) return;
 
   const isNewContact = contact.msgCount < NEW_CONTACT_MESSAGES;
