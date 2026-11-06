@@ -120,6 +120,9 @@ dialog.sheet::backdrop{background:rgba(20,32,42,.22);animation:fade .2s}
 .owner{margin-top:18px;font-size:13px;color:var(--muted)}
 .owner strong{display:block;color:var(--ink);font-size:15px;font-weight:550;overflow-wrap:anywhere;margin:1px 0}
 .linkbox{margin-top:12px;padding:11px 13px;background:var(--well);box-shadow:var(--well-shadow);border-radius:var(--r-m);font-size:13px;overflow-wrap:anywhere}
+.pick{margin-top:10px}
+.pick img{display:block;max-width:100%;max-height:180px;margin-bottom:10px;border-radius:var(--r-m);border:1px solid var(--edge)}
+.pick .hint{display:block;margin:0 0 8px}
 .switch{display:flex;align-items:center;gap:12px;margin-top:20px;cursor:pointer;font-weight:500;font-size:13.5px}
 .switch span{flex:1}
 .switch small{display:block;font-weight:400;color:var(--muted);font-size:13px}
@@ -272,7 +275,7 @@ function showManage(b){
    (b.username?'<div class="send"><div>把它发给要用的人<strong>@'+esc(b.username)+'</strong></div><button class="btn" id="cp">复制</button></div>':'')+
    '<div class="tabs" role="tablist"><button role="tab" data-t="owner" aria-selected="true">管理员</button><button role="tab" data-t="set" aria-selected="false">设置</button><button role="tab" data-t="more" aria-selected="false">更多</button></div>'+
    '<div data-p="owner"><div class="owner" id="cur"></div><form id="a"><label for="w">'+(b.bound?'换一个人':'指定谁来用')+'</label><input id="w" type="text" placeholder="@zhangsan" autocomplete="off"><p class="hint" id="wh"></p><div class="acts"><button class="btn primary" id="assign"></button></div></form><div id="lb"></div></div>'+
-   '<div data-p="set" hidden><form id="s"><label for="welcome">欢迎语</label><textarea id="welcome" placeholder="读取中…"></textarea><label class="switch"><span>人机验证<small>第一次发消息要答一道 10 以内的加减题</small></span><input id="v" type="checkbox" role="switch"></label><div class="acts"><button class="btn primary">保存设置</button></div></form></div>'+
+   '<div data-p="set" hidden><form id="s"><label for="welcome">第一次的自动回复</label><p class="hint" style="margin:0 0 8px">陌生人第一次私信机器人时发一次。可以带一张图片。</p><textarea id="welcome" placeholder="读取中…"></textarea><div class="pick"><img id="pv" alt="自动回复的图片" hidden><span id="pn" class="hint" hidden>已设置图片</span><div class="acts" style="margin-top:0"><button type="button" class="btn" id="pa">添加图片</button><button type="button" class="btn bare" id="pr" hidden>去掉图片</button></div><input id="pf" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><label class="switch"><span>人机验证<small>第一次发消息要答一道 10 以内的加减题</small></span><input id="v" type="checkbox" role="switch"></label><div class="acts"><button class="btn primary">保存设置</button></div></form></div>'+
    '<div data-p="more" hidden>'+(b.canDelete?'<form id="k" class="section" style="margin-top:18px"><h4>换 Token</h4><p class="hint">在 @BotFather 重置过 Token，或者这个机器人连不上时用。</p><input id="tk" type="password" placeholder="新的 Token" autocomplete="off" style="margin-top:10px"><div class="acts"><button class="btn">换 Token</button></div></form><div class="section"><h4>删除机器人</h4><p class="hint">它的聊天记录会一起删掉，不能恢复。要删的话，输入 <strong>'+esc(b.name)+'</strong> 确认。</p><input id="dn" type="text" autocomplete="off" style="margin-top:10px"><div class="acts"><button type="button" class="btn danger" id="del" disabled>删除机器人</button></div></div>':'<p class="hint" style="margin-top:18px">这是安装时的默认机器人，它的 Token 和卸载都在服务器上用 tgbot 命令操作。</p>')+'</div>'+
    '<p class="err" hidden></p><p class="note" hidden></p>');
   const paint=()=>{
@@ -287,7 +290,13 @@ function showManage(b){
   paint();
   d.querySelector('#cp')?.addEventListener('click',()=>copy('@'+b.username,'已复制，发给朋友就行。'));
   d.querySelectorAll('[data-t]').forEach(t=>t.onclick=()=>{d.querySelectorAll('[data-t]').forEach(x=>x.setAttribute('aria-selected',x===t));d.querySelectorAll('[data-p]').forEach(p=>p.hidden=p.dataset.p!==t.dataset.t);d.querySelector('.err').hidden=true;d.querySelector('.note').hidden=true});
-  call(path+'/settings').then(s=>{d.querySelector('#welcome').value=s.welcome;d.querySelector('#v').checked=s.verify}).catch(e=>fail(d,e));
+  let newImage='',dropImage=false;
+  const pv=d.querySelector('#pv'),pn=d.querySelector('#pn'),pa=d.querySelector('#pa'),pr=d.querySelector('#pr'),pf=d.querySelector('#pf');
+  const showImage=(src,has)=>{pv.hidden=!src;if(src)pv.src=src;pn.hidden=!has||!!src;pr.hidden=!has;pa.textContent=has?'换一张':'添加图片'};
+  call(path+'/settings').then(async s=>{d.querySelector('#welcome').value=s.welcome;d.querySelector('#v').checked=s.verify;showImage('',s.hasImage);if(s.hasImage){const i=await call(path+'/image');if(i.data)showImage(i.data,true)}}).catch(e=>fail(d,e));
+  pa.onclick=()=>pf.click();
+  pr.onclick=()=>{newImage='';dropImage=true;pf.value='';showImage('',false)};
+  pf.onchange=()=>{const f=pf.files[0];if(!f)return;if(f.size>5242880){fail(d,new Error('图片太大了，请控制在 5 MB 以内。'));pf.value='';return}const r=new FileReader();r.onload=()=>{newImage=r.result;dropImage=false;showImage(newImage,true)};r.readAsDataURL(f)};
   let armed=false;
   d.querySelector('#a').onsubmit=async ev=>{ev.preventDefault();const w=d.querySelector('#w').value.trim(),btn=d.querySelector('#assign');
     if(b.bound&&!armed){armed=true;btn.textContent='再点一次确认：清除现在的管理员';return}
@@ -295,7 +304,7 @@ function showManage(b){
     try{const r=await call(path+'/assign','POST',{user:w});b.link=undefined;Object.assign(b,r);paint();d.querySelector('#w').value='';refresh();
       ok(d,w?'已指定 '+w+'，让他私聊机器人，发条消息就能用了。':b.link?'已生成链接，发给新管理员，打开就绑定。':'已开放，谁先点「成为管理员」就归谁。')}catch(e){paint();fail(d,e)}};
   d.querySelector('#w').oninput=()=>{if(armed){armed=false;paint()}};
-  d.querySelector('#s').onsubmit=async ev=>{ev.preventDefault();try{await call(path+'/settings','POST',{welcome:d.querySelector('#welcome').value,verify:d.querySelector('#v').checked});ok(d,'设置已保存，马上生效。')}catch(e){fail(d,e)}};
+  d.querySelector('#s').onsubmit=async ev=>{ev.preventDefault();try{await call(path+'/settings','POST',{welcome:d.querySelector('#welcome').value,verify:d.querySelector('#v').checked,...(newImage?{image:newImage}:{}),...(dropImage?{removeImage:true}:{})});newImage='';dropImage=false;ok(d,'设置已保存，马上生效。')}catch(e){fail(d,e)}};
   d.querySelector('#k')?.addEventListener('submit',async ev=>{ev.preventDefault();try{await call(path+'/token','POST',{token:d.querySelector('#tk').value});d.querySelector('#tk').value='';ok(d,'Token 已换好，几秒后生效。');refresh()}catch(e){fail(d,e)}});
   const dn=d.querySelector('#dn'),del=d.querySelector('#del');
   if(dn){dn.oninput=()=>{del.disabled=dn.value!==b.name};del.onclick=async()=>{try{await call(path,'DELETE');d.close();toast('已删除 '+title(b));refresh()}catch(e){fail(d,e)}}}

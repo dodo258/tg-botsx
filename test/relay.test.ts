@@ -914,7 +914,7 @@ describe("管理面板：不打命令也能管理", () => {
 
   it("欢迎语从设置第一页就能改，不用再进一层", async () => {
     await h.press(OWNER, OWNER, 1, "m:main");
-    expect(dataOf(h.tg.last("editMessageText"), "改欢迎语")).toBe("mi:welcome");
+    expect(dataOf(h.tg.last("editMessageText"), "第一次自动回复")).toBe("mi:welcome");
   });
 
   it("陌生人发 /start 看不到面板，按面板按钮也没有反应", async () => {
@@ -1672,6 +1672,77 @@ describe("空档期和通知失败", () => {
     h.tg.failNext("sendMessage", 0, "network");
     await h.fromUser(ALICE, "这一条");
     expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'filtered'")).n)).toBe(1);
+  });
+});
+
+describe("第一次的自动回复", () => {
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+  });
+
+  it("只有文字：点开始时回一次，之后的消息不再回文字，只打 👌", async () => {
+    await h.set("welcome", "你好，有事留言");
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.textsTo(ALICE)).toEqual(["你好，有事留言"]);
+    await h.fromUser(ALICE, "第一句");
+    await h.app.db.prepare("UPDATE contacts SET unread = 0").run();
+    await h.fromUser(ALICE, "第二句");
+    expect(h.tg.textsTo(ALICE)).toEqual(["你好，有事留言"]);
+    expect(h.tg.named("setMessageReaction").filter((params) => params.chat_id === ALICE)).toHaveLength(2);
+  });
+
+  it("在 Telegram 里发带说明的图片：文字和图片一起发", async () => {
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    await h.fromOwner(undefined as never, { photo: [{ file_id: "small", file_unique_id: "s", width: 1, height: 1 }, { file_id: "big", file_unique_id: "b", width: 9, height: 9 }], caption: "看这张图" });
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.last("sendPhoto")).toMatchObject({ chat_id: ALICE, photo: "big", caption: "看这张图" });
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+  });
+
+  it("网页上传的图片：第一次上传，之后用文件编号", async () => {
+    await h.app.db.prepare("INSERT INTO assets(name, mime, data) VALUES('welcome', 'image/png', 'iVBORw0KGgo=')").run();
+    await h.set("welcomeImage", true);
+    h.tg.responses.set("sendPhoto", { photo: [{ file_id: "fid" }] });
+    const upload = h.tg.upload.bind(h.tg);
+    h.tg.upload = (async (method: string, params: Record<string, unknown>) => {
+      await upload(method, params);
+      return { photo: [{ file_id: "fid" }] };
+    }) as never;
+    await h.fromUser(ALICE, "/start");
+    await h.send({});
+    expect(h.app.settings.welcomePhotoId).toBe("fid");
+    await h.fromUser(BOB, "/start");
+    expect(h.tg.last("sendPhoto")).toMatchObject({ chat_id: BOB, photo: "fid" });
+  });
+
+  it("图片发不出去时退回文字，不能让人收不到回复", async () => {
+    await h.set("welcome", "文字还在");
+    await h.set("welcomeImage", true);
+    await h.set("welcomePhotoId", "old");
+    h.tg.failNext("sendPhoto", 400, "Bad Request: wrong file identifier");
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.textsTo(ALICE)).toEqual(["文字还在"]);
+    await h.send({});
+    expect(h.app.settings.welcomeImage).toBe(false);
+  });
+
+  it("文字超过图片说明上限时分两条发", async () => {
+    await h.set("welcome", "长".repeat(1500));
+    await h.set("welcomeImage", true);
+    await h.set("welcomePhotoId", "fid");
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.last("sendPhoto").caption).toBeUndefined();
+    expect(h.tg.textsTo(ALICE)).toHaveLength(1);
+  });
+
+  it("菜单里能去掉图片", async () => {
+    await h.set("welcomeImage", true);
+    await h.set("welcomePhotoId", "fid");
+    await h.press(OWNER, OWNER, 1, "mc:welcomePhoto:off");
+    await h.send({});
+    expect(h.app.settings.welcomeImage).toBe(false);
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.named("sendPhoto")).toHaveLength(0);
   });
 });
 

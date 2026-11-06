@@ -148,6 +148,10 @@ const MIGRATIONS: string[] = [
     awaiting_at INTEGER
   );
   `,
+  // 网页上传的图片。存 base64 文本，备份时跟着数据库走
+  `
+  CREATE TABLE assets(name TEXT PRIMARY KEY, mime TEXT NOT NULL, data TEXT NOT NULL);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

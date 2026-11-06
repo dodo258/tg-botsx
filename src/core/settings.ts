@@ -15,6 +15,9 @@ export interface Settings {
   maxVerifyFailures: number;
   lockMinutes: number;
   welcome: string;
+  /** 第一次自动回复带的图片：Telegram 的文件编号；网页上传的第一次发送后才有 */
+  welcomePhotoId: string;
+  welcomeImage: boolean;
   receiptEnabled: boolean;
   receipt: string;
   offlineEnabled: boolean;
@@ -63,6 +66,8 @@ export const DEFAULT_SETTINGS: Settings = {
   maxVerifyFailures: 3,
   lockMinutes: 60,
   welcome: "你好，这里是留言通道。\n直接发文字、图片或文件就行，我们看到后会在这里回复你。",
+  welcomePhotoId: "",
+  welcomeImage: false,
   receiptEnabled: true,
   receipt: "已收到，我们会尽快回复。",
   offlineEnabled: false,

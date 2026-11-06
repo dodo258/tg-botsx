@@ -74,12 +74,21 @@ class HttpError extends Error {
   }
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+// 上传图片是 base64，比原文件大三分之一
+const MAX_UPLOAD_BODY = 8 * 1024 * 1024;
+const MAX_IMAGE = 5 * 1024 * 1024;
+const IMAGE_MAGIC: Record<string, (bytes: Buffer) => boolean> = {
+  "image/jpeg": (b) => b[0] === 0xff && b[1] === 0xd8,
+  "image/png": (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
+  "image/webp": (b) => b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP",
+};
+
+async function readJson(req: IncomingMessage, max = MAX_BODY): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req as AsyncIterable<Buffer>) {
     size += chunk.length;
-    if (size > MAX_BODY) throw new HttpError(413, "内容太长了。");
+    if (size > max) throw new HttpError(413, "内容太大了，图片请控制在 5 MB 以内。");
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
@@ -154,7 +163,7 @@ export function startWeb(options: WebOptions): Server {
     const db = sqliteDb(dbPath(env, name));
     try {
       const s = await loadSettings(db);
-      return { welcome: s.welcome, verify: s.verifyMode === "quiz" };
+      return { welcome: s.welcome, verify: s.verifyMode === "quiz", hasImage: s.welcomeImage };
     } finally {
       db.close();
     }
@@ -224,7 +233,7 @@ export function startWeb(options: WebOptions): Server {
       }
       return { results };
     }
-    const match = /^\/api\/bots\/([^/]+)(?:\/(assign|token|settings))?$/.exec(path);
+    const match = /^\/api\/bots\/([^/]+)(?:\/(assign|token|settings|image))?$/.exec(path);
     if (!match) throw new HttpError(404, "没有这个接口。");
     const name = requireBot(decodeURIComponent(match[1] ?? ""));
     const action = match[2];
@@ -242,16 +251,42 @@ export function startWeb(options: WebOptions): Server {
       await replaceToken(env, name, text(body.token));
       return { ok: true };
     }
+    if (action === "image" && method === "GET") {
+      const db = sqliteDb(dbPath(env, name));
+      try {
+        const asset = await db.prepare("SELECT mime, data FROM assets WHERE name = 'welcome'").first<{ mime: unknown; data: unknown }>();
+        return { data: asset ? `data:${text(asset.mime)};base64,${text(asset.data)}` : "" };
+      } finally {
+        db.close();
+      }
+    }
     if (action === "settings") {
       if (method === "GET") return await readBotSettings(name);
       if (method === "POST") {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_UPLOAD_BODY);
         const db = sqliteDb(dbPath(env, name));
         try {
           const settings = await loadSettings(db);
+          // 先校验再写，一项不对就都不改
+          const image = text(body.image);
+          const upload = image ? /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(image) : null;
+          if (image && !upload) throw new HttpError(400, "图片只支持 JPG、PNG、WebP。");
+          const bytes = upload ? Buffer.from(upload[2] ?? "", "base64") : null;
+          if (bytes && bytes.length > MAX_IMAGE) throw new HttpError(400, "图片太大了，请控制在 5 MB 以内。");
+          if (bytes && upload && !IMAGE_MAGIC[upload[1] ?? ""]?.(bytes)) throw new HttpError(400, "这个文件不是有效的图片。");
+          const willHaveImage = bytes !== null || (settings.welcomeImage && body.removeImage !== true);
           if (typeof body.welcome === "string") {
-            if (!body.welcome.trim() || body.welcome.length > 2000) throw new HttpError(400, "欢迎语不能是空的，也不能超过 2000 字。");
+            if ((!body.welcome.trim() && !willHaveImage) || body.welcome.length > 2000) throw new HttpError(400, "自动回复不能是空的（有图片时可以不写字），也不能超过 2000 字。");
             await saveSetting(db, settings, "welcome", body.welcome);
+          }
+          if (body.removeImage === true || (bytes && upload)) {
+            await db.prepare("DELETE FROM assets WHERE name = 'welcome'").run();
+            await saveSetting(db, settings, "welcomePhotoId", "");
+            await saveSetting(db, settings, "welcomeImage", false);
+          }
+          if (bytes && upload) {
+            await db.prepare("INSERT INTO assets(name, mime, data) VALUES('welcome', ?, ?)").bind(upload[1] ?? "", bytes.toString("base64")).run();
+            await saveSetting(db, settings, "welcomeImage", true);
           }
           if (typeof body.verify === "boolean") await saveSetting(db, settings, "verifyMode", body.verify ? "quiz" : "off");
         } finally {

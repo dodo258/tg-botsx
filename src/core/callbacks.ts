@@ -145,6 +145,14 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       return true;
     }
     case "mc":
+      if (arg === "welcomePhoto") {
+        await saveSetting(app.db, app.settings, "welcomePhotoId", "");
+        await saveSetting(app.db, app.settings, "welcomeImage", false);
+        await app.db.prepare("DELETE FROM assets WHERE name = 'welcome'").run();
+        const menu = renderMenu(app, "auto");
+        await edit(ctx, menu.text, menu.keyboard);
+        return true;
+      }
       if (arg === "verifyMode" && (extra === "off" || extra === "quiz")) {
         await saveSetting(app.db, app.settings, "verifyMode", extra);
         const menu = renderMenu(app, "verify");

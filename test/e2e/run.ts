@@ -245,6 +245,15 @@ async function testWeb(fake: FakeServer): Promise<void> {
 
     const saved = await call("POST", "/api/bots/friend-bot/settings", { welcome: "朋友的欢迎语", verify: false });
     check("网页能改欢迎语和验证开关", saved.data.welcome === "朋友的欢迎语" && saved.data.verify === false, saved.raw);
+    const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const uploaded = await call("POST", "/api/bots/friend-bot/settings", { image: png });
+    check("网页能上传图片", uploaded.status === 200 && uploaded.data.hasImage === true, uploaded.raw);
+    check("上传的图片能读回来", (await call("GET", "/api/bots/friend-bot/image")).data.data === png);
+    const notImage = await call("POST", "/api/bots/friend-bot/settings", { image: "data:image/png;base64,bm90IGltYWdl" });
+    check("假图片被拒绝", notImage.status === 400 && notImage.raw.includes("不是有效的图片"), notImage.raw);
+    check("没登录拿不到图片", (await (async () => { const saved = cookie; cookie = ""; const r = await call("GET", "/api/bots/friend-bot/image"); cookie = saved; return r; })()).status === 401);
+    const noImage = await call("POST", "/api/bots/friend-bot/settings", { removeImage: true });
+    check("网页能去掉图片", noImage.data.hasImage === false, noImage.raw);
     check("删不存在的机器人报错", (await call("DELETE", "/api/bots/nope")).status === 404);
     check("路径穿越被挡住", (await call("DELETE", "/api/bots/..%2F..%2Fweb")).status === 404);
     const deleted = await call("DELETE", "/api/bots/friend-bot");

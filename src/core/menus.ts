@@ -106,12 +106,12 @@ export function renderMenu(app: App, page: string): Menu {
       return {
         text:
           "<b>💬 自动回复</b>\n\n" +
-          `<b>欢迎语</b>（/start 时发送）：\n${clipHtml(s.welcome, 900)}\n\n` +
-          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：每条消息上打 👌，只在第一次和隔了 30 天才发这句话：\n${clipHtml(s.receipt, 900)}\n\n` +
+          `<b>第一次的自动回复</b>（陌生人第一次私信时发一次${s.welcomeImage ? "，带图片" : ""}）：\n${clipHtml(s.welcome, 900)}\n\n` +
+          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：每条消息上打 👌，隔了 30 天再来才发这句话：\n${clipHtml(s.receipt, 900)}\n\n` +
           `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${clipHtml(s.offlineMessage, 900)}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "👋 改欢迎语", callback_data: "mi:welcome" }],
+            [{ text: "👋 改第一次自动回复", callback_data: "mi:welcome" }, ...(s.welcomeImage ? [{ text: "🖼 去掉图片", callback_data: "mc:welcomePhoto:off" }] : [])],
             [{ text: toggle(s.receiptEnabled, "收到回执"), callback_data: "mt:receiptEnabled" }, { text: "✏️ 改回执文字", callback_data: "mi:receipt" }],
             [{ text: toggle(s.offlineEnabled, "离线回复"), callback_data: "mt:offlineEnabled" }, { text: "✏️ 改离线文字", callback_data: "mi:offlineMessage" }],
             [{ text: "🕘 改在线时段", callback_data: "mi:onlineHours" }, { text: "🌏 改时区", callback_data: "mi:timezone" }],
@@ -160,7 +160,7 @@ export function renderMenu(app: App, page: string): Menu {
         text: `<b>⚙️ 设置</b>\n\n消息收在：${deskModeLabel(s)}\n人机验证：${s.verifyMode === "quiz" ? "开" : "关"}\n聊天保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "👋 改欢迎语", callback_data: "mi:welcome" }, { text: "💬 自动回复", callback_data: "m:auto" }],
+            [{ text: "👋 第一次自动回复", callback_data: "mi:welcome" }, { text: "💬 自动回复", callback_data: "m:auto" }],
             [{ text: "🔐 人机验证", callback_data: "m:verify" }, { text: "🛡 防骚扰", callback_data: "m:filter" }],
             [{ text: "📥 消息收在哪", callback_data: "m:desk" }, { text: "🗄 数据", callback_data: "m:data" }],
             backRow(),
@@ -209,7 +209,7 @@ function textInput(prompt: string, key: "welcome" | "receipt" | "offlineMessage"
 }
 
 export const INPUTS: Record<string, InputSpec> = {
-  welcome: textInput("发来新的欢迎语。", "welcome"),
+  welcome: textInput("发来新的第一次自动回复。可以只有文字，也可以发一张带说明的图片。", "welcome"),
   receipt: textInput("发来新的收到回执。", "receipt"),
   offlineMessage: textInput("发来新的离线回复。", "offlineMessage"),
   verifyTtlDays: intInput("验证多少天有效？发 0 表示通过一次永久有效。", "verifyTtlDays", 0, 3650),
@@ -308,6 +308,16 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
   if (text.startsWith("/")) {
     await clearAwaiting(app, staffId, message.chat.id);
     return false;
+  }
+  // 第一次自动回复可以带图片：发图就换图，图片说明就是文字
+  if (awaiting === "welcome" && message.photo?.length) {
+    await saveSetting(app.db, app.settings, "welcomePhotoId", message.photo.at(-1)?.file_id ?? "");
+    await saveSetting(app.db, app.settings, "welcomeImage", true);
+    await app.db.prepare("DELETE FROM assets WHERE name = 'welcome'").run();
+    if (message.caption) await saveSetting(app.db, app.settings, "welcome", message.caption.slice(0, 2000));
+    await clearAwaiting(app, staffId, message.chat.id);
+    await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回设置", callback_data: "m:main" }]] });
+    return true;
   }
   if (!text) {
     await reply("这里要发文字。", CANCEL_KEYBOARD);

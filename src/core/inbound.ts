@@ -5,7 +5,7 @@ import { bufferAlbum } from "./album.ts";
 import type { App } from "./app.ts";
 import type { Contact } from "./contacts.ts";
 import { bumpDaily, getContact, identityHtml, touchContact } from "./contacts.ts";
-import { num } from "./db.ts";
+import { num, str } from "./db.ts";
 import { contactKeyboard, copyToDesk, noticeToOwner } from "./desk.ts";
 import { evaluate } from "./filter.ts";
 import { clipHtml, describe } from "./message-info.ts";
@@ -99,6 +99,47 @@ export async function releaseHeld(app: App, contact: Contact): Promise<void> {
     // 转完一条删一条：deliver 失败会记成待补发，这里抛错时没转的留着下次再转
     await app.db.prepare("DELETE FROM held_messages WHERE user_id = ? AND message_id = ?").bind(contact.userId, userMsgId).run();
   }
+}
+
+/** Telegram 的图片说明最长 1024 字，超了分两条发 */
+const CAPTION_LIMIT = 1024;
+
+/**
+ * 第一次的自动回复，可以带一张图片。发过之后不再发文字回执，后面只打 👌。
+ * 图片发不出去（比如换过 Token，旧文件编号失效）时退回只发文字，不能让人收不到回复。
+ */
+async function sendWelcome(app: App, contact: Contact): Promise<void> {
+  const text = app.settings.welcome;
+  const chat = contact.userId;
+  await app.db.prepare("UPDATE contacts SET last_receipt_at = ? WHERE user_id = ?").bind(app.now(), chat).run();
+  const fits = text.length <= CAPTION_LIMIT;
+  const caption = fits && text ? { caption: text } : {};
+  let photoSent = false;
+  if (app.settings.welcomeImage) {
+    try {
+      if (app.settings.welcomePhotoId) {
+        await app.tg.call("sendPhoto", { chat_id: chat, photo: app.settings.welcomePhotoId, ...caption });
+        photoSent = true;
+      } else {
+        const asset = await app.db.prepare("SELECT mime, data FROM assets WHERE name = 'welcome'").first<{ mime: unknown; data: unknown }>();
+        if (asset) {
+          const bytes = new Uint8Array(Buffer.from(str(asset.data), "base64"));
+          const sent = await app.tg.upload<{ photo?: { file_id: string }[] }>("sendPhoto", { chat_id: chat, ...caption }, "photo", bytes, "welcome", str(asset.mime));
+          photoSent = true;
+          // 记下文件编号，之后不用每次都上传
+          const fileId = sent.photo?.at(-1)?.file_id;
+          if (fileId) await saveSetting(app.db, app.settings, "welcomePhotoId", fileId);
+        }
+      }
+    } catch (error) {
+      if (error instanceof TelegramError && error.userUnreachable) throw error;
+      app.log("warn", "自动回复的图片发送失败，改发文字", error instanceof Error ? error.message : String(error));
+      await saveSetting(app.db, app.settings, "welcomePhotoId", "");
+      const asset = await app.db.prepare("SELECT name FROM assets WHERE name = 'welcome'").first();
+      if (!asset) await saveSetting(app.db, app.settings, "welcomeImage", false);
+    }
+  }
+  if (text && (!photoSent || !fits)) await app.tg.call("sendMessage", { chat_id: chat, text });
 }
 
 /** 有管理员了，把空档期间存下的消息转过去。还没通过验证的人继续等验证。 */
@@ -249,7 +290,7 @@ export async function handleContactMessage(app: App, message: Message, user: Use
     if (!isStart) await holdForVerification(app, contact, message, info);
     // 对方清空聊天后点开始，旧题已经看不到了，要重发
     if (!challengePending(app, contact) || isStart) {
-      if (isStart) await app.tg.call("sendMessage", { chat_id: user.id, text: app.settings.welcome });
+      if (isStart) await sendWelcome(app, contact);
       await sendChallenge(app, contact);
     }
     return;
@@ -257,7 +298,7 @@ export async function handleContactMessage(app: App, message: Message, user: Use
   // 关掉验证或设成免验证后，之前暂存的消息要转过去
   await releaseHeld(app, contact);
   if (isStart) {
-    await app.tg.call("sendMessage", { chat_id: user.id, text: app.settings.welcome });
+    await sendWelcome(app, contact);
     return;
   }
   if (!(await consumeRate(app, contact))) return;
