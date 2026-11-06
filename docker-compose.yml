@@ -1,7 +1,6 @@
 services:
   bot:
     build: .
-    container_name: tg-botsx
     restart: unless-stopped
     init: true
     env_file: .env

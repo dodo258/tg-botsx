@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # 传声筒管理命令。不带参数显示菜单。
+# 同一台服务器可以跑多个机器人，每个一个目录、一个数据卷、一份 Token，互相看不到数据：
+#   默认机器人在 /opt/tg-botsx，用 tgbot add shop 新增的在 /opt/tg-botsx-shop。
 set -euo pipefail
 
-DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
+PRIMARY="${TGBOTSX_DIR:-/opt/tg-botsx}"
+DIR="$PRIMARY"
+NAME=""
 INSTALL_URL="https://raw.githubusercontent.com/${TGBOTSX_REPO:-dodo258/tg-botsx}/${TGBOTSX_BRANCH:-main}/deploy/install.sh"
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
-[ -f "$DIR/docker-compose.yml" ] || die "在 $DIR 没找到安装。先运行安装脚本。"
 [ "$(id -u)" -eq 0 ] || exec sudo -E "$0" "$@"
+manage() { printf 'tgbot%s' "${NAME:+ $NAME}"; }
 compose() { (cd "$DIR" && docker compose "$@"); }
 run_node() { compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts "$@"; }
 
@@ -22,7 +26,7 @@ bot_running() {
 }
 
 cmd_backup() {
-  bot_running || die "机器人没在运行，没法在线备份。先 tgbot restart。"
+  bot_running || die "机器人没在运行，没法在线备份。先 $(manage) restart。"
   local name target
   name="relay-$(date +%Y%m%d-%H%M%S).db"
   target="$DIR/backups"
@@ -68,18 +72,111 @@ cmd_restore() {
   printf '已恢复。\n'
 }
 
-cmd_update() {
-  printf '更新前先备份数据…\n'
-  backup_if_possible
+# 环境变量里的 Token 和反代地址会盖过 .env，只有新增机器人时才该传
+run_installer() {
   if [ -n "${TGBOTSX_SOURCE:-}" ]; then
-    TGBOTSX_YES=1 bash "$TGBOTSX_SOURCE/deploy/install.sh"
+    TGBOTSX_YES=1 TGBOTSX_DIR="$DIR" TGBOTSX_NAME="$NAME" bash "$TGBOTSX_SOURCE/deploy/install.sh"
     return
   fi
   local installer
   installer="$(mktemp)"
   curl -fsSL --max-time 60 "$INSTALL_URL" -o "$installer" || die "下载安装脚本失败。"
-  TGBOTSX_YES=1 bash "$installer"
+  TGBOTSX_YES=1 TGBOTSX_DIR="$DIR" TGBOTSX_NAME="$NAME" bash "$installer"
   rm -f "$installer"
+}
+
+cmd_update() {
+  printf '更新前先备份数据…\n'
+  backup_if_possible
+  unset BOT_TOKEN TELEGRAM_API_BASE
+  run_installer
+}
+
+# 所有已安装机器人的目录，一行一个
+instance_dirs() {
+  local dir
+  for dir in "$PRIMARY" "$PRIMARY"-*; do
+    if [ -f "$dir/docker-compose.yml" ]; then printf '%s\n' "$dir"; fi
+  done
+}
+
+name_of() {
+  if [ "$1" = "$PRIMARY" ]; then printf '默认'; else printf '%s' "${1#"$PRIMARY"-}"; fi
+}
+
+has_other_instances() {
+  [ -n "$(instance_dirs | grep -vxF "$DIR" || true)" ]
+}
+
+# 一个 Token 同时跑两份，两边都会被 Telegram 断开。打印正在用它的机器人名字
+token_owner() {
+  local dir
+  while IFS= read -r dir; do
+    if [ "$dir" != "$DIR" ] && [ -f "$dir/.env" ] && [ "$(sed -n 's/^BOT_TOKEN=//p' "$dir/.env" | head -n 1)" = "$1" ]; then
+      name_of "$dir"
+      return
+    fi
+  done < <(instance_dirs)
+}
+
+refuse_token_in_use() {
+  local owner
+  owner="$(token_owner "$1")"
+  [ -z "$owner" ] || die "这个 Token 已经给「$owner」用了。同一个 Token 跑两份，两边都收不到消息。去 @BotFather 发 /newbot 新建一个机器人。"
+}
+
+is_command() {
+  case "$1" in
+    add|list|update-all|status|logs|restart|update|backup|restore|claim|token|uninstall) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_name() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,29}$ ]]
+}
+
+cmd_add() {
+  local name="${1:-}" token="${BOT_TOKEN:-}"
+  [ -n "$name" ] || die "用法：tgbot add 名字。比如 tgbot add shop"
+  valid_name "$name" || die "名字只能用小写英文字母、数字和连字符，最长 30 个字符，比如 shop 或 team-2。"
+  ! is_command "$name" || die "$name 是 tgbot 自己的命令，换一个名字。"
+  NAME="$name"
+  DIR="$PRIMARY-$name"
+  [ ! -f "$DIR/docker-compose.yml" ] || die "已经有叫 $name 的机器人了。管理它：$(manage)"
+  if [ -z "$token" ]; then
+    printf '每个机器人要有自己的 Token：在 @BotFather 发 /newbot 新建一个。\n'
+    read -r -s -p "粘贴 Bot Token（输入时不显示）: " token
+    printf '\n'
+    [ -n "$token" ] || die "没有输入。"
+  fi
+  refuse_token_in_use "$token"
+  export BOT_TOKEN="$token"
+  run_installer
+}
+
+cmd_list() {
+  local dir state username
+  while IFS= read -r dir; do
+    if (cd "$dir" && docker compose ps --status running --services 2>/dev/null) | grep -qx bot; then state="运行中"; else state="已停止"; fi
+    username="$( (cd "$dir" && docker compose logs bot 2>/dev/null) | grep -o '已连接 @[A-Za-z0-9_]*' | tail -n 1 | sed 's/已连接 //' || true)"
+    printf '%s\t%s\t%s\n' "$(name_of "$dir")" "$state" "${username:--}"
+  done < <(instance_dirs)
+}
+
+# 所有机器人共用一个 tgbot 命令，单独更新一个时命令已是新版，其他也要跟上
+cmd_update_all() {
+  local dir failed=""
+  while IFS= read -r dir; do
+    printf '\n== 更新 %s ==\n' "$(name_of "$dir")"
+    if [ "$dir" = "$PRIMARY" ]; then
+      "$0" update < /dev/null || failed="$failed 默认"
+    else
+      "$0" "$(name_of "$dir")" update < /dev/null || failed="$failed $(name_of "$dir")"
+    fi
+  done < <(instance_dirs)
+  [ -z "$failed" ] || die "这些机器人更新失败：$failed。其他的已更新。"
+  printf '\n全部更新完了。\n'
 }
 
 cmd_token() {
@@ -87,6 +184,7 @@ cmd_token() {
   read -r -s -p "粘贴新的 Bot Token（输入时不显示）: " token
   printf '\n'
   [ -n "$token" ] || die "没有输入。"
+  refuse_token_in_use "$token"
   local updated
   umask 077
   updated="$(mktemp)"
@@ -99,8 +197,13 @@ cmd_token() {
   printf '已更新并重启。\n'
 }
 
+# tgbot 命令是共用的，还有别的机器人时要留着
+remove_command_if_last() {
+  has_other_instances || rm -f /usr/local/bin/tgbot
+}
+
 cmd_uninstall() {
-  printf '会停止并删除机器人程序。\n'
+  printf '会停止并删除机器人程序%s。其他机器人不受影响。\n' "${NAME:+（$NAME）}"
   local answer
   read -r -p "同时删除所有聊天数据吗？要删请输入「删除数据」，直接回车保留: " answer
   read -r -p "确认卸载？输入「卸载」继续: " confirm
@@ -109,18 +212,18 @@ cmd_uninstall() {
     backup_if_possible
     compose down -v
     printf '数据已删除，最后一份备份在 %s/backups（确认不需要后自己删）。\n' "$DIR"
-    rm -f /usr/local/bin/tgbot
+    remove_command_if_last
     rm -rf "$DIR/src" "$DIR/package.json" "$DIR/Dockerfile" "$DIR/.dockerignore" "$DIR/.env.example" "$DIR/docker-compose.yml"
   else
     compose down
-    rm -f /usr/local/bin/tgbot
+    remove_command_if_last
     printf '程序已停止。数据保留在 Docker 数据卷，配置在 %s，重新安装会接着用。\n' "$DIR"
   fi
 }
 
 menu() {
+  printf '传声筒 管理菜单%s\n' "${NAME:+（$NAME）}"
   cat <<'MENU'
-传声筒 管理菜单
   1) 查看状态
   2) 查看实时日志
   3) 重启
@@ -130,6 +233,8 @@ menu() {
   7) 重新绑定管理员
   8) 更换 Bot Token
   9) 卸载
+  a) 新增一个机器人
+  l) 查看所有机器人
   0) 退出
 MENU
   local choice file
@@ -144,9 +249,40 @@ MENU
     7) run_node claim ;;
     8) cmd_token ;;
     9) cmd_uninstall ;;
+    a) read -r -p "新机器人的名字（小写英文，比如 shop）: " file; cmd_add "$file" ;;
+    l) cmd_list ;;
     *) ;;
   esac
 }
+
+usage() {
+  cat <<'USAGE'
+用法：
+  tgbot [名字] [status|logs|restart|update|backup|restore 文件|claim|token|uninstall]
+  tgbot add 名字    新增一个机器人
+  tgbot list        查看所有机器人
+  tgbot update-all  更新所有机器人
+不写名字就是管理默认机器人。
+USAGE
+}
+
+# 不针对某一个机器人的命令
+case "${1:-}" in
+  add) cmd_add "${2:-}"; exit ;;
+  list) cmd_list; exit ;;
+  update-all) cmd_update_all; exit ;;
+  *) ;;
+esac
+
+# 第一个参数不是命令就是机器人的名字
+if [ -n "${1:-}" ] && ! is_command "$1"; then
+  if ! valid_name "$1"; then usage; exit 1; fi
+  [ -f "$PRIMARY-$1/docker-compose.yml" ] || die "没有叫 $1 的机器人。运行 tgbot list 查看已有的。"
+  NAME="$1"
+  DIR="$PRIMARY-$1"
+  shift
+fi
+[ -f "$DIR/docker-compose.yml" ] || die "在 $DIR 没找到默认机器人。没装过就先运行安装脚本；用 tgbot add 新增的运行 tgbot list 查看。"
 
 case "${1:-}" in
   "") menu ;;
@@ -159,5 +295,5 @@ case "${1:-}" in
   claim) run_node claim ;;
   token) cmd_token ;;
   uninstall) cmd_uninstall ;;
-  *) printf '用法：tgbot [status|logs|restart|update|backup|restore 文件|claim|token|uninstall]\n' ;;
+  *) usage ;;
 esac

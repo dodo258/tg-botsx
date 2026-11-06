@@ -1,6 +1,6 @@
 # 传声筒
 
-中文 Telegram 双向客服机器人。别人给机器人发消息，你在 Telegram 里回复，对方看不到你的账号。
+中文 Telegram 私人双向机器人。别人给机器人发消息，你在 Telegram 里回复，对方看不到你的账号。机器人是你自己的，不经过任何第三方。
 
 贴一个 Token、点一下链接就能用。不用查数字 ID，不用域名，也不用另开后台：所有设置都在 Telegram 里改。
 
@@ -30,6 +30,25 @@ tgbot uninstall       卸载，默认保留数据
 ```
 
 服务器连不上 Telegram（国内常见）时，在 `/opt/tg-botsx/.env` 里配代理或反代，写法见 [.env.example](.env.example)，然后 `tgbot restart`。
+
+### 同一台服务器跑多个机器人
+
+要给不同的人各开一个，用 `tgbot add` 新增。每个机器人有自己的 Token、管理员、数据库和备份目录，数据互不相通。
+
+```bash
+tgbot add shop
+```
+
+名字只能用小写英文字母、数字和连字符。粘贴新机器人的 Token 后，把认领链接发给要当管理员的人。之后在命令里带上名字：
+
+```text
+tgbot shop status     管理 shop，其他命令同上（不写名字就是默认机器人）
+tgbot shop            打开 shop 的管理菜单
+tgbot list            查看所有机器人
+tgbot update-all      更新所有机器人
+```
+
+新机器人的文件在 `/opt/tg-botsx-shop`。这里的隔离是机器人之间的：有服务器 root 权限的人能读到所有机器人的 Token 和聊天记录。替别人开之前请告诉对方；不想让你看到的人，应该部署到自己的服务器。
 
 不想用 Docker：需要 Node.js 22.18+，把仓库放到 `/opt/tg-botsx`，写好 `.env`，用 [deploy/tg-botsx.service](deploy/tg-botsx.service) 启动。运行时没有第三方依赖，不用 `npm install`。
 
@@ -95,7 +114,7 @@ tgbot uninstall       卸载，默认保留数据
 
 ## 数据和隐私
 
-你部署的机器人，数据就在你自己的服务器里。聊天内容默认保留 180 天后自动抹掉（`/settings` → 数据 里可改），联系人和回复关系保留，老消息依然能回复。
+你部署的机器人，数据就在你自己的服务器里，没有中心服务。聊天内容默认保留 180 天后自动抹掉（`/settings` → 数据 里可改），联系人和回复关系保留，老消息依然能回复。
 
 如果你公开使用这个机器人，你就是这些数据的控制者，请按当地法律告知用户。
 

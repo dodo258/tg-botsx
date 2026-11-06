@@ -8,12 +8,14 @@
 #   TGBOTSX_REPO        下载源码的仓库，默认 dodo258/tg-botsx
 #   TGBOTSX_SOURCE      用本地目录当源码，不下载
 #   TGBOTSX_DIR         安装目录，默认 /opt/tg-botsx
+#   TGBOTSX_NAME        机器人的名字，tgbot add 新增机器人时传入，只影响提示文字
 #   TGBOTSX_YES=1       所有确认都按「是」
 set -euo pipefail
 
 REPO="${TGBOTSX_REPO:-dodo258/tg-botsx}"
 BRANCH="${TGBOTSX_BRANCH:-main}"
 DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
+MANAGE="tgbot${TGBOTSX_NAME:+ $TGBOTSX_NAME}"
 # 从 tgbot update 调用时可能继承 umask 077，程序文件必须让容器里的 node 用户读得到
 umask 022
 
@@ -169,14 +171,14 @@ show_claim() {
   logs="$(cd "$DIR" && docker compose logs bot 2>/dev/null)"
   link="$(printf '%s\n' "$logs" | grep -o 'https://t.me/[^ ]*start=claim_[A-Za-z0-9_-]*' | tail -n 1 || true)"
   if [ -z "$link" ]; then
-    say "已经绑定过管理员了。要换人的话运行：tgbot claim"
+    say "已经绑定过管理员了。要换人的话运行：$MANAGE claim"
     return
   fi
   say "用你要当管理员的 Telegram 账号打开这个链接，点「开始」（10 分钟内有效）："
   say ""
   say "  $link"
   say ""
-  say "过期了运行 tgbot claim 重新生成。"
+  say "过期了运行 $MANAGE claim 重新生成。"
 }
 
 main() {
@@ -190,7 +192,7 @@ main() {
   start_bot
   show_claim
   step "装好了"
-  say "以后管理机器人运行：tgbot"
+  say "以后管理机器人运行：$MANAGE"
   say "设置在 Telegram 里给机器人发 /settings。"
 }
 
