@@ -10,11 +10,12 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import type { App } from "../core/app.ts";
+import { num } from "../core/db.ts";
 import { loadSettings } from "../core/settings.ts";
 import { claimLink, createClaim, fetchBot } from "../core/setup.ts";
 import { createTelegram, TelegramError } from "../core/telegram.ts";
 import { cryptoRng } from "../core/verify.ts";
-import { addBot, allNames, dbPath, DEFAULT_NAME, describeBot, extraNames, readToken, removeBot, replaceToken } from "./fleet.ts";
+import { addBot, allNames, dbPath, DEFAULT_NAME, describeSafely, extraNames, readToken, removeBot, replaceToken } from "./fleet.ts";
 import type { BotInfo, FleetEnv } from "./fleet.ts";
 import { startBot } from "./runner.ts";
 import type { RunningBot } from "./runner.ts";
@@ -44,6 +45,10 @@ async function printClaim(app: App, username: string): Promise<void> {
     console.log("\n绑定已过期。运行 tgbot claim 重新生成。\n");
     return;
   }
+  if (s.claimMode === "link") {
+    console.log(`\n用新管理员的账号打开这个链接并点开始（7 天内有效）：\n${link}\n`);
+    return;
+  }
   const pair = s.claimPair ? `再点和这个一样的图案：\n配对图案：${s.claimPair}\n` : "配对按钮已失效，用下面的链接。\n";
   console.log(`\n用要当管理员的账号打开 @${username}，点开始，${pair}也可以直接打开这个链接，不用点图案：\n${link}\n`);
 }
@@ -59,6 +64,7 @@ function readStdin(): Promise<string[]> {
 const readStdinLine = async () => (await readStdin())[0] ?? "";
 
 function infoLine(info: BotInfo): string {
+  if (info.broken) return [info.name, "-", `数据库打不开：${info.broken}`].join("\t");
   const state = info.bound ? `已绑定 ${info.ownerName || ""}`.trim() : info.claimOpen ? (info.claimMode === "user" ? `等 @${info.claimUser} 绑定` : info.claimMode === "pair" ? `等人绑定，配对图案 ${info.claimPair || "已失效"}` : info.claimMode === "link" ? "等人用链接绑定" : "等人绑定") : "绑定已过期";
   return [info.name, info.username ? `@${info.username}` : "-", state].join("\t");
 }
@@ -77,7 +83,9 @@ async function cliClaim(name: string): Promise<void> {
     log: () => undefined,
   };
   const bot = await fetchBot(app).catch(() => fail("Telegram 不认这个 Token，或连不上 Telegram。"));
-  await createClaim(app);
+  // 没有管理员但已有联系人：只给链接。开放按钮的话老客户也能点，点中就能读别人的聊天记录
+  const contacts = await db.prepare("SELECT COUNT(*) AS n FROM contacts").first<{ n: unknown }>();
+  await createClaim(app, app.settings.ownerId === null && num(contacts?.n) > 0 ? { mode: "link" } : undefined);
   await printClaim(app, bot.username);
   db.close();
 }
@@ -133,7 +141,7 @@ if (command !== undefined) {
         break;
       }
       case "list":
-        for (const name of allNames(env)) console.log(infoLine(await describeBot(env, name)));
+        for (const name of allNames(env)) console.log(infoLine(await describeSafely(env, name)));
         break;
       default:
         fail(`不认识的命令：${command}。可用：claim、backup、add、remove、token、list`);
@@ -199,6 +207,8 @@ function scan(): void {
     console.log(`停止机器人 ${name}`);
     void bot.stop();
   }
+  // 删掉再加同名机器人时要能重新启动
+  for (const name of broken.keys()) if (!wanted.has(name)) broken.delete(name);
   for (const [name, token] of wanted) {
     if (!running.has(name)) launch(name, token);
   }

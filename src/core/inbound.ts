@@ -73,8 +73,11 @@ async function quarantine(app: App, contact: Contact, userMsgId: number, info: M
     bumpDaily(app, "filtered"),
   ]);
   if (filterReason !== null || contact.msgCount > 0) return;
+  // 消息已经入库。通知只是提醒，失败不能让调用方以为这条没处理，否则会重复入库
   await noticeToOwner(app, `新联系人待审核：\n${identityHtml(contact)}\n\n${clipHtml(info.text, 300)}`, {
     inline_keyboard: [[{ text: "放行", callback_data: `approve:${contact.userId}` }, { text: "屏蔽", callback_data: `block:${contact.userId}` }]],
+  }).catch((error: unknown) => {
+    app.log("warn", "发送待审核通知失败", error instanceof Error ? error.message : String(error));
   });
   await app.db.prepare("UPDATE contacts SET msg_count = msg_count + 1 WHERE user_id = ?").bind(contact.userId).run();
   contact.msgCount += 1;
@@ -103,7 +106,14 @@ export async function releaseAllHeld(app: App): Promise<void> {
   const rows = await app.db.prepare("SELECT DISTINCT user_id FROM held_messages").all<{ user_id: unknown }>();
   for (const row of rows) {
     const contact = await getContact(app, num(row.user_id));
-    if (contact && !needsVerification(app, contact)) await releaseHeld(app, contact);
+    if (!contact || contact.blockedAt !== null) continue;
+    // 一个人出错不能挡住后面的人
+    try {
+      if (!needsVerification(app, contact)) await releaseHeld(app, contact);
+      else if (!challengePending(app, contact)) await sendChallenge(app, contact, "这边设置好了。答完这道题，刚才的消息就转过去。");
+    } catch (error) {
+      app.log("warn", `转发 ${contact.userId} 暂存的消息失败`, error instanceof Error ? error.message : String(error));
+    }
   }
 }
 

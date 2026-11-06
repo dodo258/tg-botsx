@@ -55,14 +55,19 @@ cmd_logs() {
 }
 
 cmd_backup() {
+  backup_bot "$NAME"
+}
+
+# 参数是机器人的名字，空字符串是默认机器人
+backup_bot() {
   bot_running || die "机器人没在运行，没法在线备份。先 tgbot restart。"
-  local name target
-  name="relay${NAME:+-$NAME}-$(date +%Y%m%d-%H%M%S).db"
+  local bot="$1" name target
+  name="relay${bot:+-$bot}-$(date +%Y%m%d-%H%M%S).db"
   target="$DIR/backups"
   mkdir -p "$target"
   chmod 700 "$target"
   # 用数据库自带的在线备份，不用停机，也不会拷到写了一半的文件
-  run_node backup "/data/$name" ${NAME:+"$NAME"} </dev/null
+  run_node backup "/data/$name" ${bot:+"$bot"} </dev/null
   # 容器根目录只读、/tmp 是内存盘，docker cp 取不到，所以写进数据卷后用 cat 取出
   # 子 shell 限定 umask，不影响后面调用的安装脚本
   ( umask 077; compose exec -T bot cat "/data/$name" </dev/null > "$target/$name" )
@@ -73,17 +78,29 @@ cmd_backup() {
   printf '已备份到 %s\n' "$target/$name"
 }
 
+BACKUP_FAILED=""
+
+# 一个机器人备份失败（比如数据库坏了）不能挡住其他的，但要说出来
 backup_all_if_possible() {
   if ! bot_running; then
     printf '机器人没在运行，跳过这次备份。\n'
     return
   fi
-  local name
+  local name bot
   while IFS=$'\t' read -r name _; do
-    if [ "$name" = "默认" ]; then NAME=""; else NAME="$name"; fi
-    cmd_backup
+    if [ -z "$name" ]; then continue; fi
+    bot="$name"
+    if [ "$name" = "默认" ]; then bot=""; fi
+    if ! ( backup_bot "$bot" ) </dev/null; then
+      BACKUP_FAILED="$BACKUP_FAILED $name"
+    fi
   done < <(run_node list </dev/null)
-  NAME=""
+  if [ -n "$BACKUP_FAILED" ]; then printf '注意：这些机器人没备份成功：%s\n' "$BACKUP_FAILED" >&2; fi
+}
+
+cmd_backup_all() {
+  backup_all_if_possible
+  [ -z "$BACKUP_FAILED" ]
 }
 
 # 恢复前尽量备份；机器人挂了也不能拦住修复
@@ -182,7 +199,8 @@ cmd_uninstall() {
     local confirm_bot
     read -r -p "确认删除？输入「删除」继续: " confirm_bot
     [ "$confirm_bot" = "删除" ] || { printf '已取消。\n'; return; }
-    cmd_backup
+    # 数据库坏了备份不了，这时也要能删掉它
+    if ! ( cmd_backup ); then printf '这个机器人备份不了，直接删除。\n'; fi
     run_node remove "$NAME" </dev/null
     return
   fi
@@ -328,7 +346,13 @@ cmd_web_on() {
     set_env WEB_DOMAIN ""
     set_env COMPOSE_FILE "docker-compose.yml:docker-compose.web.yml"
   fi
-  compose up -d --remove-orphans
+  if ! compose up -d --remove-orphans; then
+    # 比如 Caddy 镜像拉不下来、80 端口绑定失败。配置不能留在这种打不开的状态
+    if [ -z "$domain" ]; then die "启动失败，看上面的报错。"; fi
+    printf '\n域名方式启动失败，看上面的报错。\n'
+    fall_back_to_port "$domain"
+    return
+  fi
   local waited=0
   until bot_running && compose exec -T bot true </dev/null 2>/dev/null; do
     sleep 1
@@ -416,7 +440,7 @@ MENU
     2) cmd_logs ;;
     3) cmd_restart ;;
     4) cmd_update ;;
-    5) if [ -n "$NAME" ]; then cmd_backup; else backup_all_if_possible; fi ;;
+    5) if [ -n "$NAME" ]; then cmd_backup; else cmd_backup_all; fi ;;
     6) read -r -p "备份文件路径: " file; cmd_restore "$file" ;;
     7) run_node claim ${NAME:+"$NAME"} </dev/null ;;
     8) cmd_token ;;
@@ -471,7 +495,7 @@ case "${1:-}" in
   logs) cmd_logs ;;
   restart) cmd_restart ;;
   update) cmd_update ;;
-  backup) if [ -n "$NAME" ]; then cmd_backup; else backup_all_if_possible; fi ;;
+  backup) if [ -n "$NAME" ]; then cmd_backup; else cmd_backup_all; fi ;;
   restore) cmd_restore "${2:-}" ;;
   claim) need_running; run_node claim ${NAME:+"$NAME"} </dev/null ;;
   token) cmd_token ;;

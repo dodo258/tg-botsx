@@ -197,6 +197,13 @@ check("更新后网页还开着，不换密码", !updatedAll.out.includes("密�
 await sleep(5000);
 check("更新后新机器人的数据还在", await hasContact(OTHER_DB, 6001));
 
+// 不填 Token 装的网页版：更新不能再问 Token
+await sudo(`sed -i '/^BOT_TOKEN=/d' ${DIR}/.env`);
+const noTokenUpdate = await sudo("unset BOT_TOKEN; tgbot update");
+check("没有默认 Token 时也能更新", noTokenUpdate.code === 0 && noTokenUpdate.out.includes("沿用现有配置"), noTokenUpdate.out);
+await sudo(`printf 'BOT_TOKEN=${TOKEN}\\n' >> ${DIR}/.env; tgbot restart`);
+await sleep(5000);
+
 const unknownBot = await sudo("tgbot meiyou status");
 check("名字不存在时说清楚", unknownBot.code !== 0 && unknownBot.out.includes("没有叫 meiyou 的机器人"), unknownBot.out);
 

@@ -7,7 +7,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { freemem as osFree, totalmem } from "node:os";
 import { join } from "node:path";
 import { saveSetting, loadSettings } from "../core/settings.ts";
-import { addBot, allNames, assignOwner, dbPath, DEFAULT_NAME, describeBot, removeBot, replaceToken } from "./fleet.ts";
+import { addBot, allNames, assignOwner, dbPath, DEFAULT_NAME, describeSafely, removeBot, replaceToken } from "./fleet.ts";
 import type { BotInfo, FleetEnv } from "./fleet.ts";
 import { sqliteDb } from "./sqlite-adapter.ts";
 import { loadOrCreateCert } from "./tls.ts";
@@ -205,7 +205,7 @@ export function startWeb(options: WebOptions): Server {
     }
     if (path === "/api/bots" && method === "GET") {
       const names = allNames(env);
-      const bots = await Promise.all(names.map(async (name) => botView(await describeBot(env, name))));
+      const bots = await Promise.all(names.map(async (name) => botView(await describeSafely(env, name))));
       return { bots, server: { rss: process.memoryUsage().rss, total: totalmem(), free: osFree(), uptime: Math.floor(process.uptime()) } };
     }
     if (path === "/api/bots" && method === "POST") {

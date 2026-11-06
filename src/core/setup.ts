@@ -103,25 +103,30 @@ async function becomeOwner(app: App, user: User, chatId: number): Promise<void> 
     await app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
     await app.db.prepare("DELETE FROM staff_state").run();
   }
+  // 新管理员没见过任何卡片，下一条消息要带上是谁发的
+  await saveSetting(app.db, app.settings, "lastCardUser", 0);
   await saveSetting(app.db, app.settings, "claimCode", "");
   await saveSetting(app.db, app.settings, "claimExpiresAt", 0);
   await saveSetting(app.db, app.settings, "claimPair", "");
-  await syncCommands(app);
   // 安装脚本靠这行告诉部署的人是谁绑定的
   app.log("info", "已绑定管理员", displayName(user));
-  await app.tg.call("sendMessage", {
+  // 绑定已经成立。后面每一步都只是通知，网络出错不能让空档期的消息卡住
+  const quietly = (what: string, job: Promise<unknown>) =>
+    job.catch((error: unknown) => {
+      app.log("warn", what, error instanceof Error ? error.message : String(error));
+    });
+  await quietly("同步命令菜单失败", syncCommands(app));
+  await quietly("发送绑定成功提示失败", app.tg.call("sendMessage", {
     chat_id: chatId,
     parse_mode: "HTML",
     text:
       "<b>绑定成功，你现在是这个机器人的管理员。</b>\n\n" +
       "别人发给机器人的消息会转到这里，<b>回复那条消息</b>就是回复对方，对方看不到你的账号。\n\n" +
       "现在用另一个账号给机器人发条消息试试。下面是管理面板，所有操作点按钮就行。以后想打开它，点输入框旁边的菜单。",
-  });
+  }));
   const panel = await renderPanel(app, true, user.id);
-  await app.tg.call("sendMessage", { chat_id: chatId, text: panel.text, parse_mode: "HTML", reply_markup: panel.keyboard });
-  await releaseAllHeld(app).catch((error: unknown) => {
-    app.log("warn", "转发空档期的消息失败", error instanceof Error ? error.message : String(error));
-  });
+  await quietly("发送管理面板失败", app.tg.call("sendMessage", { chat_id: chatId, text: panel.text, parse_mode: "HTML", reply_markup: panel.keyboard }));
+  await quietly("转发空档期的消息失败", releaseAllHeld(app));
   if (previous !== null && previous !== user.id) {
     await app.tg.call("sendMessage", { chat_id: previous, text: "这个机器人的管理员已被更换。如果不是你操作的，请立刻去 @BotFather 重置 Token。" }).catch((error: unknown) => {
       app.log("warn", "通知原管理员失败", error instanceof Error ? error.message : String(error));

@@ -184,8 +184,9 @@ function showLogin(){
     try{await call('/api/login','POST',{user:document.getElementById('u').value,password:document.getElementById('p').value});await load()}catch(err){e.textContent=err.message;e.hidden=false}};
 }
 
-const kind=b=>b.state==='failed'||(!b.bound&&!b.claimOpen)?'bad':b.bound?'ok':'wait';
+const kind=b=>b.broken||b.state==='failed'||(!b.bound&&!b.claimOpen)?'bad':b.bound?'ok':'wait';
 function who(b){
+  if(b.broken)return '<div class="who bad">数据库打不开，可以恢复备份或者删掉</div>';
   if(b.state==='failed')return '<div class="who bad">Token 失效了，点开换一个</div>';
   if(b.bound)return '<div class="who">管理员 <strong>'+esc(b.ownerUsername?'@'+b.ownerUsername:b.ownerName||'已绑定')+'</strong></div>';
   if(!b.claimOpen)return '<div class="who bad">绑定已过期，点开重新开放</div>';
@@ -202,7 +203,7 @@ function stopRefresh(){clearInterval(timer);timer=null}
 async function load(){
   let data;try{data=await call('/api/bots')}catch(e){if(e.message!=='请先登录。')toast(e.message);return}
   bots=data.bots;server=data.server;render();
-  if(!timer)timer=setInterval(()=>{if(!document.hidden&&!document.querySelector('dialog[open]'))refresh()},20000);
+  if(!timer)timer=setInterval(()=>{if(!document.hidden&&!document.querySelector('dialog[open]')&&document.activeElement?.id!=='q')refresh()},20000);
 }
 async function refresh(){try{const data=await call('/api/bots');bots=data.bots;server=data.server;render()}catch{}}
 function sentence(){
@@ -213,29 +214,33 @@ function sentence(){
   if(bad)s+='，<b>'+bad+'</b> 个要处理';
   return s+'。';
 }
-function render(){
-  const focused=document.activeElement?.id;
-  const counts={all:bots.length,ok:0,wait:0,bad:0};bots.forEach(b=>counts[kind(b)]++);
-  if(filter!=='all'&&!counts[filter])filter='all';
+function listHtml(){
   const q=query.trim().toLowerCase();
   const shown=bots.filter(b=>(filter==='all'||kind(b)===filter)&&(!q||(b.username+' '+b.name+' '+b.ownerName+' '+b.ownerUsername+' '+b.claimUser).toLowerCase().includes(q)));
+  const cap=b=>esc((b.username||b.name).replace(/[^a-zA-Z0-9]/g,'').slice(0,2).toUpperCase()||'#');
+  return '<div class="rope"><span class="pulse"></span></div>'+(shown.length?shown.map(b=>'<button class="row" data-n="'+esc(b.name)+'"><span class="knot '+kind(b)+'"></span><span class="cap">'+cap(b)+'</span><span><div class="name">'+esc(title(b))+'</div>'+who(b)+'</span><span class="nums"><span><strong>'+b.contacts+'</strong>联系人</span><span><strong>'+b.inbound+'</strong>消息</span></span>'+CHEV+'</button>').join(''):'<p class="none">没有符合的机器人。</p>');
+}
+function bindRows(){app.querySelectorAll('.row').forEach(el=>el.onclick=()=>showManage(bots.find(b=>b.name===el.dataset.n)))}
+function render(){
+  const counts={all:bots.length,ok:0,wait:0,bad:0};bots.forEach(b=>counts[kind(b)]++);
+  if(filter!=='all'&&!counts[filter])filter='all';
   const tab=(k,l)=>counts[k]||k==='all'?'<button class="tab" data-f="'+k+'" aria-pressed="'+(filter===k)+'">'+l+'<i>'+counts[k]+'</i></button>':'';
   const head='<header><div class="brand">'+CAN+'传声筒</div><span class="grow"></span><button class="btn bare" id="acct">账号</button><button class="btn primary" id="add">添加机器人</button></header>';
   if(!bots.length){
     app.innerHTML='<div class="wrap">'+head+'<div class="panel empty">'+waves()+ART()+'<h2>这条线还没接上。</h2><p>在 Telegram 的 @BotFather 发 /newbot 新建一个机器人，把它给你的 Token 粘贴过来。</p><button class="btn primary" id="add2" style="position:relative">添加第一个机器人</button></div></div>';
   }else{
-    const cap=b=>esc((b.username||b.name).replace(/[^a-zA-Z0-9]/g,'').slice(0,2).toUpperCase()||'#');
     app.innerHTML='<div class="wrap">'+head+'<section class="panel hero">'+waves()+ART()+'<h1 class="lead">'+sentence()+'</h1><p class="meta">程序占 '+mb(server.rss)+' MB 内存，服务器还剩 '+mb(server.free)+' MB</p></section>'+
     '<div class="tools"><div class="seg">'+tab('all','全部')+tab('ok','在用')+tab('wait','等人来')+tab('bad','要处理')+'</div>'+(bots.length>6?'<input id="q" type="search" placeholder="找机器人或管理员" aria-label="搜索" value="'+esc(query)+'">':'')+'</div>'+
-    '<div class="panel list"><div class="rope"><span class="pulse"></span></div>'+(shown.length?shown.map(b=>'<button class="row" data-n="'+esc(b.name)+'"><span class="knot '+kind(b)+'"></span><span class="cap">'+cap(b)+'</span><span><div class="name">'+esc(title(b))+'</div>'+who(b)+'</span><span class="nums"><span><strong>'+b.contacts+'</strong>联系人</span><span><strong>'+b.inbound+'</strong>消息</span></span>'+CHEV+'</button>').join(''):'<p class="none">没有符合的机器人。</p>')+'</div></div>';
+    '<div class="panel list">'+listHtml()+'</div></div>';
   }
   document.getElementById('add').onclick=showAdd;
   document.getElementById('add2')?.addEventListener('click',showAdd);
   document.getElementById('acct').onclick=showAccount;
   app.querySelectorAll('[data-f]').forEach(el=>el.onclick=()=>{filter=el.dataset.f;render()});
-  app.querySelectorAll('.row').forEach(el=>el.onclick=()=>showManage(bots.find(b=>b.name===el.dataset.n)));
+  bindRows();
+  // 搜索只换列表，不重建输入框，否则中文输入法打不了字
   const input=document.getElementById('q');
-  if(input){input.oninput=()=>{query=input.value;render()};if(focused==='q'){input.focus();input.setSelectionRange(query.length,query.length)}}
+  if(input)input.oninput=()=>{query=input.value;app.querySelector('.list').innerHTML=listHtml();bindRows()};
 }
 
 function sheet(html){
@@ -287,7 +292,7 @@ function showManage(b){
   d.querySelector('#a').onsubmit=async ev=>{ev.preventDefault();const w=d.querySelector('#w').value.trim(),btn=d.querySelector('#assign');
     if(b.bound&&!armed){armed=true;btn.textContent='再点一次确认：清除现在的管理员';return}
     armed=false;
-    try{const r=await call(path+'/assign','POST',{user:w});Object.assign(b,r);paint();d.querySelector('#w').value='';refresh();
+    try{const r=await call(path+'/assign','POST',{user:w});b.link=undefined;Object.assign(b,r);paint();d.querySelector('#w').value='';refresh();
       ok(d,w?'已指定 '+w+'，让他私聊机器人，发条消息就能用了。':b.link?'已生成链接，发给新管理员，打开就绑定。':'已开放，谁先点「成为管理员」就归谁。')}catch(e){paint();fail(d,e)}};
   d.querySelector('#w').oninput=()=>{if(armed){armed=false;paint()}};
   d.querySelector('#s').onsubmit=async ev=>{ev.preventDefault();try{await call(path+'/settings','POST',{welcome:d.querySelector('#welcome').value,verify:d.querySelector('#v').checked});ok(d,'设置已保存，马上生效。')}catch(e){fail(d,e)}};

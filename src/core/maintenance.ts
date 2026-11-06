@@ -92,8 +92,9 @@ async function reportGivenUp(app: App): Promise<void> {
   const row = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE status = 'failed' AND direction = 'in' AND created_at <= ?").bind(app.now() - RETRY_WINDOW).first<{ n: unknown }>();
   const count = num(row?.n);
   if (count === 0) return;
-  await app.db.prepare("UPDATE messages SET status = 'lost' WHERE status = 'failed' AND direction = 'in' AND created_at <= ?").bind(app.now() - RETRY_WINDOW).run();
+  // 先通知再标记：通知失败时下一轮还会再说，不能让它悄悄消失
   await noticeToOwner(app, `有 ${count} 条消息补发了 24 小时都没送到，已经放弃。在「最近会话」里点对方，「聊天记录」里还能看到内容。`);
+  await app.db.prepare("UPDATE messages SET status = 'lost' WHERE status = 'failed' AND direction = 'in' AND created_at <= ?").bind(app.now() - RETRY_WINDOW).run();
 }
 
 export async function dailyCleanup(app: App): Promise<void> {

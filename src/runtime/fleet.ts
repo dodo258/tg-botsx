@@ -146,6 +146,17 @@ export interface BotInfo {
   link: string;
   contacts: number;
   inbound: number;
+  /** 数据库打不开时的原因。这时其他字段都是空的 */
+  broken?: string;
+}
+
+/** 列表用：一个机器人的数据库坏了，它这一行显示故障，不能让整个列表出不来。 */
+export async function describeSafely(env: FleetEnv, name: string): Promise<BotInfo> {
+  try {
+    return await describeBot(env, name);
+  } catch (error) {
+    return { name, username: "", bound: false, ownerName: "", ownerUsername: "", ownerId: null, claimOpen: false, claimMode: "open", claimUser: "", claimPair: "", claimExpiresAt: 0, link: "", contacts: 0, inbound: 0, broken: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function describeBot(env: FleetEnv, name: string): Promise<BotInfo> {
@@ -188,7 +199,7 @@ export async function assignOwner(env: FleetEnv, name: string, userInput: string
   const db = sqliteDb(dbPath(env, name));
   try {
     await migrate(db);
-    await db.prepare("DELETE FROM settings WHERE key IN ('ownerId', 'ownerName', 'ownerUsername', 'deskMode', 'groupId')").run();
+    await db.prepare("DELETE FROM settings WHERE key IN ('ownerId', 'ownerName', 'ownerUsername', 'deskMode', 'groupId', 'lastCardUser')").run();
     await db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
     await db.prepare("DELETE FROM staff_state").run();
   } finally {

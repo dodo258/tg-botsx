@@ -111,6 +111,12 @@ configure_token() {
     shift
     MORE_TOKENS="$*"
   fi
+  # 不填 Token 装的网页版：更新和重跑安装时沿用现有配置，不要再问 Token
+  if [ -z "$token" ] && [ -f "$env_file" ] && ! grep -q '^BOT_TOKEN=.' "$env_file" && grep -q '^COMPOSE_FILE=.*\(web\|caddy\)' "$env_file"; then
+    say "沿用现有配置，机器人在网页上管理。"
+    NO_TOKEN=1
+    return 0
+  fi
   if [ -z "$token" ] && [ -f "$env_file" ]; then
     token="$(sed -n 's/^BOT_TOKEN=//p' "$env_file" | head -n 1)"
     [ -n "$token" ] && say "沿用现有配置里的 Token。"
@@ -246,7 +252,7 @@ add_more_bots() {
 start_bot() {
   step "启动机器人"
   # 没有机器人时程序靠网页才有事可做，基础配置下会直接退出，所以先把网页配置带上
-  if [ -n "$NO_TOKEN" ] && ! grep -q '^COMPOSE_FILE=.*web' "$DIR/.env" 2>/dev/null; then
+  if [ -n "$NO_TOKEN" ] && ! grep -q '^COMPOSE_FILE=.*\(web\|caddy\)' "$DIR/.env" 2>/dev/null; then
     (
       umask 077
       touch "$DIR/.env"

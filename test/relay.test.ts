@@ -1601,3 +1601,77 @@ describe("按钮和补发的边界", () => {
     expect(h.tg.textsTo(ALICE).filter((text) => text === "99 元")).toHaveLength(1);
   });
 });
+
+describe("空档期和通知失败", () => {
+  it("没验证过的人空档期留言：绑定后发验证题，答对才转过去", async () => {
+    h = await makeHarness({ owner: false });
+    await createClaim(h.app, { mode: "user", user: "u2002" });
+    await h.fromUser(ALICE, "空档里的话");
+    expect(h.tg.textsTo(ALICE).at(-1)).toContain("消息已保存");
+    await h.fromUser(BOB, "我是管理员");
+    await h.send({});
+    expect(h.tg.textsTo(ALICE).at(-1)).toContain("答完这道题");
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    await h.passVerification(ALICE);
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === BOB)).toBe(true);
+  });
+
+  it("绑定时通知全部失败，暂存的消息也要转过去", async () => {
+    h = await makeHarness({ verify: false, owner: false });
+    await createClaim(h.app, { mode: "user", user: "u2002" });
+    await h.fromUser(ALICE, "空档里的话");
+    h.tg.failNext("setMyCommands", 0, "network");
+    h.tg.failNext("sendMessage", 0, "network");
+    h.tg.failNext("sendMessage", 0, "network");
+    await h.fromUser(BOB, "我是管理员");
+    await h.send({});
+    expect(h.app.settings.ownerId).toBe(BOB);
+    expect(num((await row("SELECT COUNT(*) AS n FROM held_messages")).n)).toBe(0);
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === BOB)).toBe(true);
+  });
+
+  it("已屏蔽的人暂存的消息不转", async () => {
+    h = await makeHarness({ verify: false, owner: false });
+    await createClaim(h.app, { mode: "user", user: "u2002" });
+    await h.fromUser(ALICE, "空档里的话");
+    await h.app.db.prepare("UPDATE contacts SET blocked_at = 1").run();
+    await h.fromUser(BOB, "我是管理员");
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+  });
+
+  it("换管理员后，新管理员第一次收到消息会带身份卡片", async () => {
+    h = await makeHarness({ verify: false });
+    await h.fromUser(ALICE, "第一条");
+    const code = await createClaim(h.app);
+    await h.fromUser(BOB, `/start claim_${code}`);
+    h.tg.reset();
+    await h.fromUser(ALICE, "换人后");
+    expect(h.tg.textsTo(BOB).join()).toContain("用户2001");
+  });
+
+  it("放弃补发的通知失败时，下一轮还会说", async () => {
+    h = await makeHarness({ verify: false });
+    await h.fromUser(ALICE, "a");
+    await h.app.db.prepare("UPDATE messages SET status = 'failed' WHERE direction = 'in'").run();
+    h.clock.now += 2 * 86_400;
+    h.tg.reset();
+    h.tg.failNext("sendMessage", 0, "network");
+    await tick(h.app);
+    expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'failed'")).n)).toBe(1);
+    await tick(h.app);
+    expect(h.tg.textsTo(OWNER).join()).toContain("已经放弃");
+    expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'lost'")).n)).toBe(1);
+  });
+
+  it("审核通知失败不影响这条消息，也不重复入库", async () => {
+    h = await makeHarness({ verify: false });
+    await h.set("reviewNewContacts", true);
+    await h.fromUser(ALICE, "第一条");
+    await h.app.db.prepare("DELETE FROM messages").run();
+    await h.app.db.prepare("UPDATE contacts SET msg_count = 0").run();
+    h.tg.failNext("sendMessage", 0, "network");
+    await h.fromUser(ALICE, "这一条");
+    expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'filtered'")).n)).toBe(1);
+  });
+});
+

@@ -2,7 +2,7 @@
 // 运行：npm run e2e
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,6 +126,14 @@ async function testNode(fake: FakeServer): Promise<void> {
     await waitFor("list", () => lister.exitCode !== null);
     check("list 列出三个并显示绑定状态", /默认\t@demo_bot/.test(listOut.join("")) && /shop-bot\t@shop_bot\t已绑定 朋友/.test(listOut.join("")) && /team\t@team_bot\t等 @someone 绑定/.test(listOut.join("")), listOut.join(""));
     check("数据文件是分开的", existsSync(join(dataDir, "bots", "shop-bot", "relay.db")) && existsSync(join(dataDir, "bots", "team", "relay.db")));
+    // 一个机器人的数据库坏了：它这一行显示故障，别的照常，能删掉
+    writeFileSync(join(dataDir, "bots", "team", "relay.db"), "这不是数据库，".repeat(400));
+    rmSync(join(dataDir, "bots", "team", "relay.db-wal"), { force: true });
+    rmSync(join(dataDir, "bots", "team", "relay.db-shm"), { force: true });
+    const brokenOut: string[] = [];
+    const brokenList = start("node", [entry, "list"], env, brokenOut);
+    await waitFor("list", () => brokenList.exitCode !== null);
+    check("数据库坏了 list 也能列完", brokenList.exitCode === 0 && /team\t-\t数据库打不开/.test(brokenOut.join("")) && brokenOut.join("").includes("shop-bot"), brokenOut.join(""));
     const removed = start("node", [entry, "remove", "team"], env, []);
     await waitFor("remove", () => removed.exitCode !== null);
     check("删除一个不影响其他", removed.exitCode === 0 && !existsSync(join(dataDir, "bots", "team")) && existsSync(join(dataDir, "bots", "shop-bot", "relay.db")));
