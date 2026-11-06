@@ -2,7 +2,7 @@
 import type { App } from "./app.ts";
 import { dayKey, getContact } from "./contacts.ts";
 import { num } from "./db.ts";
-import { copyToDesk } from "./desk.ts";
+import { noticeToOwner, copyToDesk } from "./desk.ts";
 import { toMessage } from "./messages.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
@@ -40,17 +40,22 @@ export async function broadcastTick(app: App): Promise<void> {
   let failed = 0;
   const unreachable: number[] = [];
   for (const recipient of recipients) {
+    if (app.isStopping?.()) break;
     const userId = num(recipient.user_id);
     try {
       await app.tg.call("copyMessage", { chat_id: userId, from_chat_id: fromChat, message_id: fromMsg });
       sent++;
     } catch (error) {
-      // 被限流就停在这一个，下一轮从这里继续
-      if (error instanceof TelegramError && error.code === 429) break;
+      // 被限流、网络问题或服务器出错就停在这一个，下一轮从这里继续。这些人不是真的发不到
+      if (!(error instanceof TelegramError) || error.code === 429 || error.code === 0 || error.code === 401 || error.code >= 500) break;
       failed++;
       if (error instanceof TelegramError && error.userUnreachable) unreachable.push(userId);
     }
     cursor = userId;
+    // 每发一个就记下进度：进程被杀也不会从头再发一遍
+    await app.db.prepare("UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ? WHERE id = ?").bind(cursor, sent, failed, id).run();
+    sent = 0;
+    failed = 0;
   }
   await app.db.batch([
     app.db.prepare("UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ?, locked_until = NULL WHERE id = ?").bind(cursor, sent, failed, id),
@@ -75,9 +80,20 @@ export async function retryFailed(app: App): Promise<void> {
       await app.db.prepare("UPDATE messages SET status = 'sent', reason = NULL, desk_chat_id = ?, desk_msg_id = ? WHERE id = ?").bind(copied.chatId, copied.deskMsgId, stored.id).run();
     } catch (error) {
       app.log("warn", "补发失败，下一轮再试", error instanceof Error ? error.message : String(error));
-      return;
+      // 限流和网络问题这一轮都发不了，先停。别的错误只是这一条的事，不能堵住后面的人
+      if (!(error instanceof TelegramError) || error.code === 429 || error.code === 0 || error.code >= 500) return;
     }
   }
+}
+
+/** 超过补发时限还没送到的消息，告诉主人一声，别让它悄悄消失。 */
+async function reportGivenUp(app: App): Promise<void> {
+  if (app.settings.ownerId === null) return;
+  const row = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE status = 'failed' AND direction = 'in' AND created_at <= ?").bind(app.now() - RETRY_WINDOW).first<{ n: unknown }>();
+  const count = num(row?.n);
+  if (count === 0) return;
+  await app.db.prepare("UPDATE messages SET status = 'lost' WHERE status = 'failed' AND direction = 'in' AND created_at <= ?").bind(app.now() - RETRY_WINDOW).run();
+  await noticeToOwner(app, `有 ${count} 条消息补发了 24 小时都没送到，已经放弃。在「最近会话」里点对方，「聊天记录」里还能看到内容。`);
 }
 
 export async function dailyCleanup(app: App): Promise<void> {
@@ -87,7 +103,8 @@ export async function dailyCleanup(app: App): Promise<void> {
   const now = app.now();
   const statements = [
     app.db.prepare("DELETE FROM seen_updates WHERE seen_at < ?").bind(now - 3 * 86_400),
-    app.db.prepare("DELETE FROM held_messages WHERE held_at < ?").bind(now - 86_400),
+    // 换管理员的空档最长 7 天，这段时间的消息要等得到
+    app.db.prepare("DELETE FROM held_messages WHERE held_at < ?").bind(now - 8 * 86_400),
     app.db.prepare("DELETE FROM album_buffer WHERE added_at < ?").bind(app.nowMs() - 3_600_000),
     app.db.prepare("DELETE FROM cards WHERE created_at < ?").bind(now - 400 * 86_400),
   ];
@@ -101,7 +118,7 @@ export async function dailyCleanup(app: App): Promise<void> {
 }
 
 export async function tick(app: App): Promise<void> {
-  for (const job of [broadcastTick, retryFailed, dailyCleanup]) {
+  for (const job of [broadcastTick, retryFailed, reportGivenUp, dailyCleanup]) {
     try {
       await job(app);
     } catch (error) {

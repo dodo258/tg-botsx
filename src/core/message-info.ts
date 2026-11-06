@@ -85,6 +85,11 @@ export function escapeHtml(value: string): string {
 }
 
 /** 转义后不超过 max 个字符。必须先截后转义，转义后再截会切断实体或标签，Telegram 会拒收整条消息。 */
+/** 按字符截断。slice 按 UTF-16 切，可能把表情切成半个，Telegram 收到会出错 */
+export function clipChars(value: string, max: number): string {
+  return Array.from(value).slice(0, max).join("");
+}
+
 export function clipHtml(value: string, max: number): string {
   let used = 0;
   let out = "";

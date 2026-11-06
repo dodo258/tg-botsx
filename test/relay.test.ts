@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
+import { broadcastTick, retryFailed, tick } from "../src/core/maintenance.ts";
 import { CLAIM_PAIRS, createClaim } from "../src/core/setup.ts";
+import { loadSettings } from "../src/core/settings.ts";
 import { cryptoRng, makeChallenge } from "../src/core/verify.ts";
 
 let h: Harness;
@@ -235,8 +237,9 @@ describe("验证", () => {
   });
 
   it("暂存消息有上限，防止灌库", async () => {
-    for (let i = 0; i < 20; i++) await h.fromUser(ALICE, `m${i}`);
-    expect((await row("SELECT COUNT(*) AS n FROM held_messages")).n).toBe(5);
+    await h.set("messagesPerMinute", 1000);
+    for (let i = 0; i < 40; i++) await h.fromUser(ALICE, `m${i}`);
+    expect((await row("SELECT COUNT(*) AS n FROM held_messages")).n).toBe(30);
   });
 
   it("验证前发的违禁内容，通过验证后进隔离区，不会被补发", async () => {
@@ -266,7 +269,8 @@ describe("验证", () => {
     await h.press(OWNER, OWNER, 1, `exempt:${ALICE}`);
     h.tg.reset();
     await h.fromUser(ALICE, "again");
-    expect(h.tg.named("copyMessage")).toHaveLength(1);
+    // 新消息一条，加上验证前暂存的那条
+    expect(h.tg.named("copyMessage")).toHaveLength(2);
   });
 });
 
@@ -491,6 +495,66 @@ describe("自动回复", () => {
     await h.fromUser(ALICE, "/start");
     expect(h.tg.textsTo(ALICE)[0]).toBe(h.app.settings.welcome);
     expect(h.tg.named("copyMessage")).toHaveLength(0);
+  });
+
+  it("收到回执：每条消息打 👌，文字只发第一次，30 天后才再发", async () => {
+    const receipts = () => h.tg.textsTo(ALICE).filter((text) => text === h.app.settings.receipt).length;
+    await h.fromUser(ALICE, "1");
+    await h.fromUser(ALICE, "2");
+    expect(receipts()).toBe(1);
+    expect(h.tg.named("setMessageReaction").filter((params) => params.chat_id === ALICE)).toHaveLength(2);
+    await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(ALICE).run();
+    h.clock.now += 29 * 86_400;
+    await h.fromUser(ALICE, "3");
+    expect(receipts()).toBe(1);
+    await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(ALICE).run();
+    h.clock.now += 86_400 + 1;
+    await h.fromUser(ALICE, "4");
+    expect(receipts()).toBe(2);
+  });
+
+  it("关了回执，不打 👌 也不发文字", async () => {
+    await h.set("receiptEnabled", false);
+    await h.fromUser(ALICE, "1");
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+    expect(h.tg.named("setMessageReaction")).toHaveLength(0);
+  });
+
+  it("打 👌 失败不影响消息送达", async () => {
+    h.tg.failNext("setMessageReaction", 400, "Bad Request: REACTION_INVALID");
+    await h.fromUser(ALICE, "1");
+    expect(h.tg.named("copyMessage").length).toBe(1);
+    expect(h.tg.textsTo(ALICE)).toContain(h.app.settings.receipt);
+  });
+
+  it("回复别人：有未读的排最前，点名字选中后有明确提示，首页显示正在回复谁", async () => {
+    await h.fromUser(ALICE, "早来的");
+    await h.fromUser(BOB, "晚来的");
+    await h.app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(BOB).run();
+    await h.press(OWNER, OWNER, 1, "list:0");
+    const first = (h.tg.last("editMessageText").reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard[0]?.[0]?.text;
+    expect(first).toContain("用户2001");
+    await h.press(OWNER, OWNER, 2, `select:${BOB}`);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("现在发的消息都给");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("用户2002");
+    await h.press(OWNER, OWNER, 3, "p:main");
+    const panel = h.tg.last("editMessageText").reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] };
+    expect(panel.inline_keyboard[0]?.[0]?.text).toContain("正在回复：用户2002");
+    h.tg.reset();
+    await h.fromOwner("给你的回复");
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === BOB)).toBe(true);
+    await h.press(OWNER, OWNER, 3, `unselect:${BOB}`);
+    await h.press(OWNER, OWNER, 3, "p:main");
+    const after = h.tg.last("editMessageText").reply_markup as { inline_keyboard: { text: string }[][] };
+    expect(after.inline_keyboard[0]?.[0]?.text).not.toContain("正在回复");
+  });
+
+  it("没选人就发消息，提示里能直接点去选", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.fromOwner("没选人");
+    const hint = h.tg.last("sendMessage");
+    expect(String(hint.text)).toContain("没发出去");
+    expect(JSON.stringify(hint.reply_markup)).toContain("list:0");
   });
 
   it("收到回执：只在一波消息的第一条发，冷却期内不重复", async () => {
@@ -1085,16 +1149,31 @@ describe("管理面板：不打命令也能管理", () => {
       await createClaim(h.app);
     });
 
-    it("打开机器人就有 12 个图案，点对成为管理员并收到面板，窗口关闭", async () => {
+    it("打开机器人有 6 个图案，点对成为管理员并收到面板，窗口关闭", async () => {
       await h.fromUser(OWNER, "/start");
-      expect(labels(h.tg.last("sendMessage"))).toEqual(CLAIM_PAIRS);
-      await h.press(OWNER, OWNER, 9, RIGHT);
+      const shown = labels(h.tg.last("sendMessage"));
+      expect(shown).toHaveLength(6);
+      expect(new Set(shown).size).toBe(6);
+      expect(shown).toContain(CLAIM_PAIRS[0]);
+      await h.press(OWNER, OWNER, 9, dataOf(h.tg.last("sendMessage"), CLAIM_PAIRS[0] ?? ""));
       expect(h.app.settings.ownerId).toBe(OWNER);
       expect(h.app.settings.claimExpiresAt).toBe(0);
       expect(h.app.settings.claimPair).toBe("");
       expect(h.tg.textsTo(OWNER).join()).toContain("绑定成功");
       expect(h.tg.textsTo(OWNER).at(-1)).toContain("管理面板");
       expect(num((await row("SELECT COUNT(*) AS n FROM contacts")).n)).toBe(0);
+    });
+
+    it("多看几次选项也不变，取交集算不出答案", async () => {
+      const seen = new Set<string>();
+      const random = h.app.rng;
+      let n = 0;
+      h.app.rng = { ...random, int: (min, max) => min + (n++ % (max - min + 1)) };
+      for (let index = 0; index < 8; index++) {
+        await h.fromUser(ALICE, "/start");
+        seen.add(labels(h.tg.last("sendMessage")).join());
+      }
+      expect(seen.size).toBe(1);
     });
 
     it("按钮和提示里都不泄露哪个是对的", async () => {
@@ -1190,18 +1269,34 @@ describe("管理面板：不打命令也能管理", () => {
       expect(h.app.settings.ownerId).toBe(ALICE);
     });
 
-    it("指定用户名：只有他看得到按钮，别人点了也没用，大小写不敏感", async () => {
+    it("指定用户名：他私聊就直接成为管理员，不用点按钮和图案，大小写不敏感", async () => {
+      await createClaim(h.app, { mode: "user", user: "u2001" });
+      await h.fromUser(ALICE, "你好");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(ALICE);
+      expect(h.tg.textsTo(ALICE).join()).toContain("绑定成功");
+      expect(h.tg.textsTo(ALICE).at(-1)).toContain("管理面板");
+      expect(h.app.settings.claimExpiresAt).toBe(0);
+      await h.press(BOB, BOB, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(ALICE);
+    });
+
+    it("指定用户名：别人私聊没有按钮，点旧按钮也没用，抢不走", async () => {
       await createClaim(h.app, { mode: "user", user: "u2001" });
       await h.fromUser(BOB, "/start");
       expect(h.tg.textsTo(BOB).join()).not.toContain("成为管理员");
+      expect(labels(h.tg.last("sendMessage"))).toEqual([]);
       await h.press(BOB, BOB, 9, "claim");
       await h.send({});
       expect(h.app.settings.ownerId).toBeNull();
-      await h.fromUser(ALICE, "/start");
-      expect(labels(h.tg.last("sendMessage"))).toEqual(["👑 成为管理员"]);
-      await h.press(ALICE, ALICE, 9, "claim");
+    });
+
+    it("朋友没设用户名时，指定模式不会误绑", async () => {
+      await createClaim(h.app, { mode: "user", user: "u2001" });
+      await h.send({ message: { message_id: 1, date: 1, chat: { id: 7777, type: "private" }, from: { id: 7777, is_bot: false, first_name: "无用户名" }, text: "/start" } } as never);
       await h.send({});
-      expect(h.app.settings.ownerId).toBe(ALICE);
+      expect(h.app.settings.ownerId).toBeNull();
     });
 
     it("第一次绑定 7 天内有效；已有管理员时的换人链接只有 10 分钟", async () => {
@@ -1253,5 +1348,256 @@ describe("验证题：10 以内加减，三个选项", () => {
       expect(challenge.options).toContain(challenge.correct);
       for (const option of challenge.options) expect(Number(option)).toBeGreaterThanOrEqual(0);
     }
+  });
+});
+
+describe("换管理员", () => {
+  const assign = async (user: string) => {
+    // 和网页、命令行走的是同一段清理逻辑
+    await h.app.db.prepare("DELETE FROM settings WHERE key IN ('ownerId', 'ownerName', 'ownerUsername', 'deskMode', 'groupId')").run();
+    await h.app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
+    await h.app.db.prepare("DELETE FROM staff_state").run();
+    h.app.settings = await loadSettings(h.app.db);
+    await createClaim(h.app, { mode: "user", user });
+  };
+
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+  });
+
+  it("用链接换人后，旧话题群不再收消息，也不能再回复", async () => {
+    await h.fromUser(ALICE, "在旧群");
+    await h.set("deskMode", "group");
+    const code = await createClaim(h.app);
+    await h.fromUser(BOB, `/start claim_${code}`);
+    await h.send({});
+    expect(h.app.settings.ownerId).toBe(BOB);
+    expect(h.app.settings.deskMode).toBe("dm");
+    expect(h.app.settings.groupId).toBeNull();
+    h.tg.reset();
+    await h.fromUser(ALICE, "换人后");
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === BOB)).toBe(true);
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === GROUP)).toBe(false);
+    h.tg.reset();
+    await h.fromGroup(7777, `/history ${ALICE}`, null);
+    expect(h.tg.calls.filter((call) => call.method === "sendMessage")).toHaveLength(0);
+  });
+
+  it("空档期客户的消息存着，新管理员绑定后转过去", async () => {
+    await h.set("deskMode", "dm");
+    await h.set("groupId", null);
+    await h.fromUser(ALICE, "第一条");
+    await h.app.db.prepare("UPDATE contacts SET verified_at = 1").run();
+    await assign("u2002");
+    h.tg.reset();
+    await h.fromUser(ALICE, "空档里的话");
+    expect(h.tg.textsTo(ALICE).at(-1)).toContain("消息已保存");
+    await h.fromUser(ALICE, "第二句");
+    expect(h.tg.textsTo(ALICE).filter((text) => text.includes("消息已保存"))).toHaveLength(1);
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    await h.fromUser(BOB, "我来了");
+    await h.send({});
+    expect(h.app.settings.ownerId).toBe(BOB);
+    expect(h.tg.named("copyMessage").filter((params) => params.chat_id === BOB).length).toBe(2);
+  });
+
+  it("换人后对方编辑旧消息，不再发给旧管理员；被屏蔽的人编辑也不打扰", async () => {
+    await h.set("deskMode", "dm");
+    await h.set("groupId", null);
+    const id = await h.fromUser(ALICE, "原话");
+    await h.app.db.prepare("UPDATE contacts SET verified_at = 1").run();
+    await assign("u2002");
+    await h.fromUser(BOB, "我来了");
+    await h.send({});
+    h.tg.reset();
+    const edited = { message_id: id, date: 1, edit_date: 2, chat: { id: ALICE, type: "private" }, from: { id: ALICE, is_bot: false, first_name: "x" }, text: "改过" };
+    await h.send({ edited_message: edited } as never);
+    expect(h.tg.named("editMessageText")).toHaveLength(0);
+    expect(h.tg.textsTo(OWNER)).toEqual([]);
+    expect((await row("SELECT text FROM messages WHERE user_msg_id = ?", id)).text).toBe("改过");
+  });
+});
+
+describe("名字里的表情", () => {
+  it("按钮文字不会把表情切成半个", async () => {
+    h = await makeHarness({ verify: false });
+    await h.send({ message: { message_id: 1, date: 1, chat: { id: ALICE, type: "private" }, from: { id: ALICE, is_bot: false, first_name: `${"名".repeat(39)}😀😀` }, text: "hi" } } as never);
+    await h.press(OWNER, OWNER, 1, "list:0");
+    const text = (h.tg.last("editMessageText").reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard[0]?.[0]?.text ?? "";
+    expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+});
+
+describe("等待输入不能吞掉给客户的话", () => {
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+  });
+
+  it("点了改欢迎语，再长按回复客户：发给客户，欢迎语不变", async () => {
+    await h.fromUser(ALICE, "你好");
+    const copy = h.tg.calls.filter((call) => call.method === "copyMessage").at(-1);
+    expect(copy).toBeDefined();
+    const row2 = await row("SELECT desk_msg_id FROM messages WHERE user_id = ?", ALICE);
+    const welcome = h.app.settings.welcome;
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    h.tg.reset();
+    await h.fromOwner("给客户的回复", { reply_to_message: { message_id: num(row2.desk_msg_id), date: 1, chat: { id: OWNER, type: "private" } } });
+    await h.send({});
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === ALICE)).toBe(true);
+    expect(h.app.settings.welcome).toBe(welcome);
+  });
+
+  it("回复机器人的提问，算回答，不算回复客户", async () => {
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    const prompt = 9999;
+    await h.fromOwner("新欢迎语", { reply_to_message: { message_id: prompt, date: 1, chat: { id: OWNER, type: "private" } } });
+    await h.send({});
+    expect(h.app.settings.welcome).toBe("新欢迎语");
+  });
+
+  it("在私聊点的提问，去话题里发的话不算输入", async () => {
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    const welcome = h.app.settings.welcome;
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    await h.fromGroup(OWNER, "这是在话题里说的", 55);
+    await h.send({});
+    expect(h.app.settings.welcome).toBe(welcome);
+  });
+
+  it("在 A 的话题点加备注，去 B 的话题发的话不写进 A 的备注", async () => {
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    await h.fromUser(ALICE, "a");
+    await h.fromUser(BOB, "b");
+    const threadA = num((await row("SELECT thread_id FROM contacts WHERE user_id = ?", ALICE)).thread_id);
+    const threadB = num((await row("SELECT thread_id FROM contacts WHERE user_id = ?", BOB)).thread_id);
+    await h.press(7777, GROUP, 1, `note:${ALICE}`, threadA);
+    h.tg.reset();
+    await h.fromGroup(7777, "给 B 的回复", threadB);
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === BOB)).toBe(true);
+    expect((await row("SELECT note FROM contacts WHERE user_id = ?", ALICE)).note).toBe("");
+  });
+
+  it("匿名管理员写备注：写进备注，不发给客户", async () => {
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    await h.fromUser(ALICE, "a");
+    const thread = num((await row("SELECT thread_id FROM contacts WHERE user_id = ?", ALICE)).thread_id);
+    await h.press(7777, GROUP, 1, `note:${ALICE}`, thread);
+    h.tg.reset();
+    await h.send({ message: { message_id: 500, date: 1, chat: { id: GROUP, type: "supergroup", is_forum: true }, sender_chat: { id: GROUP, type: "supergroup" }, from: { id: 1087968824, is_bot: true, first_name: "Group" }, message_thread_id: thread, is_topic_message: true, text: "这人是骗子" } } as never);
+    expect((await row("SELECT note FROM contacts WHERE user_id = ?", ALICE)).note).toBe("这人是骗子");
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+  });
+});
+
+describe("按钮和补发的边界", () => {
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+  });
+
+  it("选中 B 时点 A 卡片上旧的取消选中，不影响 B", async () => {
+    await h.fromUser(ALICE, "a");
+    await h.fromUser(BOB, "b");
+    await h.press(OWNER, OWNER, 1, `select:${BOB}`);
+    await h.press(OWNER, OWNER, 2, `unselect:${ALICE}`);
+    h.tg.reset();
+    await h.fromOwner("给 B");
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === BOB)).toBe(true);
+  });
+
+  it("选中 A 时 B 来消息，B 的卡片上提醒正在回复 A", async () => {
+    await h.fromUser(ALICE, "a");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    h.tg.reset();
+    await h.fromUser(BOB, "b");
+    expect(h.tg.textsTo(OWNER).join()).toContain("你正在回复 用户2001");
+  });
+
+  it("隔离区点屏蔽，留在隔离区这一页", async () => {
+    await h.set("blockedKeywords", ["广告"]);
+    await h.fromUser(ALICE, "这是广告");
+    await h.press(OWNER, OWNER, 1, "filtered:0");
+    const page = h.tg.last("editMessageText");
+    const data = (page.reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat().find((button) => button.text.includes("屏蔽"))?.callback_data ?? "";
+    await h.press(OWNER, OWNER, 1, data);
+    expect(String(h.tg.last("editMessageText").text)).toContain("隔离区");
+    expect(h.tg.named("editMessageReplyMarkup")).toHaveLength(0);
+  });
+
+  it("按钮操作出错时弹窗说明，不是点了没反应", async () => {
+    await h.fromUser(ALICE, "a");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.fromOwner("发出去的");
+    const id = num((await row("SELECT id FROM messages WHERE direction = 'out'")).id);
+    h.tg.failNext("deleteMessage", 403, "Forbidden: bot was blocked by the user");
+    await h.press(OWNER, OWNER, 9, `undo!:${id}`);
+    expect(String(h.tg.last("answerCallbackQuery").text)).toContain("拉黑");
+  });
+
+  it("回应按钮失败不影响验证通过后转发暂存的消息", async () => {
+    h = await makeHarness();
+    await h.fromUser(ALICE, "验证前的话");
+    h.tg.failNext("answerCallbackQuery", 400, "Bad Request: query is too old");
+    await h.passVerification(ALICE);
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === OWNER)).toBe(true);
+  });
+
+  it("关掉验证后，之前暂存的消息转过去", async () => {
+    h = await makeHarness();
+    await h.fromUser(ALICE, "验证前的话");
+    await h.set("verifyMode", "off");
+    h.tg.reset();
+    await h.fromUser(ALICE, "后来的话");
+    expect(h.tg.named("copyMessage").filter((params) => params.chat_id === OWNER)).toHaveLength(2);
+  });
+
+  it("重新点开始时重发验证题", async () => {
+    h = await makeHarness();
+    await h.fromUser(ALICE, "/start");
+    h.tg.reset();
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.textsTo(ALICE).join()).toContain("答一道题");
+  });
+
+  it("群发遇到网络错误不跳过这个人，下一轮接着发", async () => {
+    await h.fromUser(ALICE, "a");
+    await h.app.db.prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, total, created_at, state) VALUES(?, 1, ?, 1, 1, 'running')").bind(OWNER, OWNER).run();
+    h.tg.failNext("copyMessage", 0, "network timeout");
+    await broadcastTick(h.app);
+    expect(num((await row("SELECT failed FROM broadcasts")).failed)).toBe(0);
+    await broadcastTick(h.app);
+    expect(num((await row("SELECT sent FROM broadcasts")).sent)).toBe(1);
+  });
+
+  it("补发时一条坏消息不堵后面的人，超时放弃会告诉主人", async () => {
+    await h.fromUser(ALICE, "a");
+    await h.fromUser(BOB, "b");
+    await h.app.db.prepare("UPDATE messages SET status = 'failed' WHERE direction = 'in'").run();
+    h.tg.reset();
+    h.tg.failNext("copyMessage", 403, "Forbidden: bot is not a member of the chat");
+    await retryFailed(h.app);
+    expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'failed' AND user_id = ?", ALICE)).n)).toBe(1);
+    expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE status = 'sent' AND user_id = ?", BOB)).n)).toBe(1);
+    h.clock.now += 2 * 86_400;
+    h.tg.reset();
+    await tick(h.app);
+    expect(h.tg.textsTo(OWNER).join()).toContain("已经放弃");
+    h.tg.reset();
+    await tick(h.app);
+    expect(h.tg.textsTo(OWNER).join()).not.toContain("已经放弃");
+  });
+
+  it("快捷回复留底失败不说没发出去，也不重复发", async () => {
+    await h.fromUser(ALICE, "a");
+    await h.fromOwner("/qadd 价格 99 元");
+    await h.press(OWNER, OWNER, 1, `qp:${ALICE}`);
+    const data = (h.tg.last("sendMessage").reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat().find((button) => button.text === "价格")?.callback_data ?? "";
+    await h.press(OWNER, OWNER, 2, data);
+    await h.press(OWNER, OWNER, 2, data);
+    expect(h.tg.textsTo(ALICE).filter((text) => text === "99 元")).toHaveLength(1);
   });
 });

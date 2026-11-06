@@ -9,6 +9,7 @@ import {
   HELP,
   offerBroadcast,
   renderBlocked,
+  renderFiltered,
   renderQuick,
   renderRules,
   searchContacts,
@@ -18,8 +19,9 @@ import {
 import { getContact, identityHtml } from "./contacts.ts";
 import { num, str } from "./db.ts";
 import { backRow, CANCEL_KEYBOARD, clearAwaiting, currentAwaiting, handleAwaitingInput, renderMore, renderPanel, setAwaiting } from "./menus.ts";
-import { clipHtml, escapeHtml, kindLabel } from "./message-info.ts";
-import { findById, toMessage } from "./messages.ts";
+import { clipChars, clipHtml, escapeHtml, kindLabel } from "./message-info.ts";
+import { findById, resolveDeskMessage, toMessage } from "./messages.ts";
+import { selectedUser, setSelected } from "./outbound.ts";
 import { retract } from "./sync.ts";
 import { TelegramError } from "./telegram.ts";
 
@@ -65,7 +67,7 @@ async function send(ctx: Ctx, html: string, keyboard?: unknown): Promise<void> {
 
 /** 让管理员发一段文字。发的时候记下在等什么，下一条消息就当作输入。 */
 async function ask(ctx: Ctx, what: string, prompt: string): Promise<void> {
-  await setAwaiting(ctx.app, ctx.query.from.id, what);
+  await setAwaiting(ctx.app, ctx.query.from.id, what, { chatId: ctx.chatId, threadId: ctx.query.message?.message_thread_id });
   await send(ctx, prompt, CANCEL_KEYBOARD);
 }
 
@@ -78,7 +80,7 @@ const quickById = (app: App, rowId: number) => app.db.prepare("SELECT name, body
 
 /** 只有主人能点的动作 */
 export const PANEL_OWNER_ACTIONS = new Set(["rl", "rv", "rd", "ra", "bc", "bcx", "ex", "cl"]);
-export const PANEL_ACTIONS = new Set(["p", "qm", "qv", "qd", "qa", "qp", "qs", "bk", "ubl", "srch", "undo", "undo!", "cancel", ...PANEL_OWNER_ACTIONS]);
+export const PANEL_ACTIONS = new Set(["p", "fblock", "unsel", "qm", "qv", "qd", "qa", "qp", "qs", "bk", "ubl", "srch", "undo", "undo!", "cancel", ...PANEL_OWNER_ACTIONS]);
 
 export async function panelAction(ctx: Ctx, action: string, arg: string, extra: string | undefined): Promise<void> {
   const { app, query } = ctx;
@@ -96,8 +98,21 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
         const more = renderMore();
         return await edit(ctx, more.text, more.keyboard);
       }
-      const panel = await renderPanel(app, owner);
+      const panel = await renderPanel(app, owner, query.from.id);
       return await edit(ctx, panel.text, panel.keyboard);
+    }
+    case "fblock": {
+      // 隔离区里屏蔽：留在隔离区这一页，不换成单人卡片的按钮
+      const userId = id(arg);
+      if (userId !== null) await app.db.prepare("UPDATE contacts SET blocked_at = ? WHERE user_id = ?").bind(app.now(), userId).run();
+      await ctx.answer("已屏蔽");
+      const page = await renderFiltered(app, 0);
+      return await edit(ctx, page.text, page.keyboard);
+    }
+    case "unsel": {
+      const userId = id(arg);
+      if (userId !== null && (await selectedUser(app, query.from.id)) === userId) await setSelected(app, query.from.id, null);
+      return await edit(ctx, "已取消选中。之后发的消息不会发给任何人，除非长按回复或重新选一个。", { inline_keyboard: [[{ text: "💬 最近会话", callback_data: "list:0" }], backRow()] });
     }
     case "cancel":
       // 等待状态在回调入口已经清掉了
@@ -131,7 +146,7 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       if (!contact) return await ctx.answer("联系人不存在。", true);
       const rows = await app.db.prepare("SELECT rowid AS id, name FROM quick_replies ORDER BY name LIMIT 30").all<{ id: unknown; name: unknown }>();
       if (rows.length === 0) return await send(ctx, "还没有快捷回复，先添加一条。", { inline_keyboard: [[{ text: "➕ 添加快捷回复", callback_data: "qa" }]] });
-      const buttons = rows.map((row) => [{ text: str(row.name).slice(0, 40), callback_data: `qs:${contact.userId}:${num(row.id)}` }]);
+      const buttons = rows.map((row) => [{ text: clipChars(str(row.name), 40), callback_data: `qs:${contact.userId}:${num(row.id)}` }]);
       return await send(ctx, `选一条发给 ${identityHtml(contact)}：`, { inline_keyboard: [...buttons, [{ text: "❌ 取消", callback_data: "dismiss" }]] });
     }
     case "qs": {
@@ -140,6 +155,9 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       const contact = userId === null ? null : await getContact(app, userId);
       const quick = rowId === null ? null : await quickById(app, rowId);
       if (!contact || !quick) return await ctx.answer("联系人或快捷回复已经没有了。", true);
+      // 按钮连点时不重复发：更新是一条条处理的，第一次处理完记录已经在了
+      const recent = await app.db.prepare("SELECT id FROM messages WHERE user_id = ? AND direction = 'out' AND text = ? AND created_at >= ? LIMIT 1").bind(contact.userId, str(quick.body), app.now() - 5).first();
+      if (recent) return await ctx.answer("刚发过了。");
       const failure = await deliverQuick(app, contact, str(quick.body), ctx.chatId, query.message?.message_thread_id, query.from.id);
       return await edit(ctx, failure ?? `已发给 ${identityHtml(contact)}。`);
     }
@@ -221,77 +239,84 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
 
 /** 管理员的下一条消息如果是在回答按钮的提问，在这里处理。返回 true 表示已处理。 */
 export async function handleInput(app: App, message: Message, staffId: number): Promise<boolean> {
-  const awaiting = await currentAwaiting(app, staffId);
+  // 明确回复了某个客户的消息，就是在回复客户，不管刚才点过什么。否则这句话会变成欢迎语或备注
+  const reply = message.reply_to_message;
+  if (reply && !Object.hasOwn(reply, "forum_topic_created") && (await resolveDeskMessage(app, message.chat.id, reply.message_id))) {
+    await clearAwaiting(app, staffId, message.chat.id);
+    return false;
+  }
+  const awaiting = await currentAwaiting(app, staffId, message);
   if (!awaiting?.startsWith("p:")) return await handleAwaitingInput(app, message, staffId);
+  const scope = { chatId: message.chat.id, threadId: message.message_thread_id };
   const text = message.text ?? "";
   const thread = message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id };
-  const reply = (body: string, keyboard?: unknown) =>
+  const answer = (body: string, keyboard?: unknown) =>
     app.tg.call("sendMessage", { chat_id: message.chat.id, ...thread, text: body, ...(keyboard === undefined ? {} : { reply_markup: keyboard }) });
   if (text === "/cancel") {
-    await clearAwaiting(app, staffId);
-    await reply("已取消。");
+    await clearAwaiting(app, staffId, message.chat.id);
+    await answer("已取消。");
     return true;
   }
   if (text.startsWith("/")) {
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     return false;
   }
   if (awaiting === "p:broadcast") {
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     await offerBroadcast(app, message, message.message_id);
     return true;
   }
   if (!text.trim()) {
-    await reply("这里要发文字。", CANCEL_KEYBOARD);
+    await answer("这里要发文字。", CANCEL_KEYBOARD);
     return true;
   }
   if (awaiting === "p:search") {
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     await searchContacts(app, message, text.trim());
     return true;
   }
   if (awaiting === "p:qname") {
     const name = text.trim();
     if (name.length > 60) {
-      await reply("名字太长了，控制在 60 字以内。", CANCEL_KEYBOARD);
+      await answer("名字太长了，控制在 60 字以内。", CANCEL_KEYBOARD);
       return true;
     }
-    await setAwaiting(app, staffId, `p:qbody:${name}`);
-    await reply(`「${name}」要发什么内容？`, CANCEL_KEYBOARD);
+    await setAwaiting(app, staffId, `p:qbody:${name}`, scope);
+    await answer(`「${name}」要发什么内容？`, CANCEL_KEYBOARD);
     return true;
   }
   if (awaiting.startsWith("p:qbody:")) {
     if (text.length > 2000) {
-      await reply("太长了，请控制在 2000 字以内。", CANCEL_KEYBOARD);
+      await answer("太长了，请控制在 2000 字以内。", CANCEL_KEYBOARD);
       return true;
     }
     await app.db
       .prepare("INSERT INTO quick_replies(name, body, updated_at) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at")
       .bind(awaiting.slice("p:qbody:".length), text, app.now())
       .run();
-    await clearAwaiting(app, staffId);
-    await reply("已保存。", { inline_keyboard: [[{ text: "⚡️ 返回快捷回复", callback_data: "qm:0" }]] });
+    await clearAwaiting(app, staffId, message.chat.id);
+    await answer("已保存。", { inline_keyboard: [[{ text: "⚡️ 返回快捷回复", callback_data: "qm:0" }]] });
     return true;
   }
   if (awaiting === "p:rkeys") {
     if (text.length > 500) {
-      await reply("关键词太长了，控制在 500 字以内。", CANCEL_KEYBOARD);
+      await answer("关键词太长了，控制在 500 字以内。", CANCEL_KEYBOARD);
       return true;
     }
-    await setAwaiting(app, staffId, `p:rbody:${text.trim()}`);
-    await reply("出现这些词时自动回复什么？", CANCEL_KEYBOARD);
+    await setAwaiting(app, staffId, `p:rbody:${text.trim()}`, scope);
+    await answer("出现这些词时自动回复什么？", CANCEL_KEYBOARD);
     return true;
   }
   if (awaiting.startsWith("p:rbody:")) {
     if (text.length > 2000) {
-      await reply("太长了，请控制在 2000 字以内。", CANCEL_KEYBOARD);
+      await answer("太长了，请控制在 2000 字以内。", CANCEL_KEYBOARD);
       return true;
     }
     await app.db.prepare("INSERT INTO auto_rules(keywords, reply, created_at) VALUES(?, ?, ?)").bind(awaiting.slice("p:rbody:".length), text, app.now()).run();
-    await clearAwaiting(app, staffId);
-    await reply("已添加。", { inline_keyboard: [[{ text: "🤖 返回关键词回复", callback_data: "rl:0" }]] });
+    await clearAwaiting(app, staffId, message.chat.id);
+    await answer("已添加。", { inline_keyboard: [[{ text: "🤖 返回关键词回复", callback_data: "rl:0" }]] });
     return true;
   }
-  await clearAwaiting(app, staffId);
+  await clearAwaiting(app, staffId, message.chat.id);
   return false;
 }

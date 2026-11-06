@@ -9,7 +9,7 @@ import { formatTime, fullName, identityHtml } from "./contacts.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
 import type { Params } from "./telegram.ts";
-import { clipHtml, escapeHtml } from "./message-info.ts";
+import { clipChars, clipHtml, escapeHtml } from "./message-info.ts";
 
 export interface DeskTarget {
   chatId: number;
@@ -73,12 +73,20 @@ export function cardText(app: App, contact: Contact): string {
   return lines.join("\n");
 }
 
+/** 选中 A 时 B 来了消息，直接打字会发给 A。在 B 的卡片上说清楚，防止发错人。 */
+async function selectionWarning(app: App, contact: Contact): Promise<string> {
+  if (app.settings.deskMode !== "dm" || app.settings.ownerId === null) return "";
+  const row = await app.db.prepare("SELECT c.user_id AS id, c.first_name AS name FROM staff_state s JOIN contacts c ON c.user_id = s.selected_user_id WHERE s.staff_id = ?").bind(app.settings.ownerId).first<{ id: unknown; name: unknown }>();
+  if (!row || row.id === contact.userId) return "";
+  return `\n\n✍️ 你正在回复 ${escapeHtml(String(row.name))}，直接打字会发给他。要回这个人，长按他的消息回复。`;
+}
+
 async function sendCard(app: App, contact: Contact, target: DeskTarget): Promise<number> {
   const inTopic = target.threadId !== null;
   const sent = await app.tg.call<{ message_id: number }>("sendMessage", {
     chat_id: target.chatId,
     ...threadParams(target),
-    text: cardText(app, contact),
+    text: `${cardText(app, contact)}${await selectionWarning(app, contact)}`,
     parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
     disable_notification: true,
@@ -110,7 +118,7 @@ async function createThread(app: App, chatId: number, contact: Contact): Promise
   try {
     const topic = await app.tg.call<{ message_thread_id: number }>("createForumTopic", {
       chat_id: chatId,
-      name: `${fullName(contact)} · ${contact.userId}`.slice(0, 128),
+      name: clipChars(`${fullName(contact)} · ${contact.userId}`, 120),
     });
     threadId = topic.message_thread_id;
   } catch (error) {

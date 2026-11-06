@@ -4,7 +4,7 @@ import type { Message, User } from "@grammyjs/types";
 import { bufferAlbum } from "./album.ts";
 import type { App } from "./app.ts";
 import type { Contact } from "./contacts.ts";
-import { bumpDaily, identityHtml, touchContact } from "./contacts.ts";
+import { bumpDaily, getContact, identityHtml, touchContact } from "./contacts.ts";
 import { num } from "./db.ts";
 import { contactKeyboard, copyToDesk, noticeToOwner } from "./desk.ts";
 import { evaluate } from "./filter.ts";
@@ -13,10 +13,11 @@ import type { MessageInfo } from "./message-info.ts";
 import { findByUserMsg, insertMessage } from "./messages.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
+import { reactOk } from "./outbound.ts";
 import { makeChallenge } from "./verify.ts";
 
 const CHALLENGE_TTL = 5 * 60;
-const MAX_HELD = 5;
+const MAX_HELD = 30;
 const AUTO_REPLY_COOLDOWN = 4 * 60 * 60;
 const FLOOD_WINDOW = 10 * 60;
 const FLOOD_GUARD = 30 * 60;
@@ -86,13 +87,23 @@ function needsReview(app: App, contact: Contact): boolean {
 /** 验证通过后处理验证前留下的消息：该拦的进隔离区，其余补发给客服台。 */
 export async function releaseHeld(app: App, contact: Contact): Promise<void> {
   const rows = await app.db.prepare("SELECT * FROM held_messages WHERE user_id = ? ORDER BY message_id").bind(contact.userId).all();
-  await app.db.prepare("DELETE FROM held_messages WHERE user_id = ?").bind(contact.userId).run();
   for (const row of rows) {
     const info: MessageInfo = { kind: typeof row.kind === "string" ? row.kind : "other", text: typeof row.text === "string" ? row.text : "", fileId: typeof row.file_id === "string" ? row.file_id : "" };
     const filterReason = typeof row.reason === "string" ? row.reason : null;
     const userMsgId = num(row.message_id);
     if (filterReason !== null || needsReview(app, contact)) await quarantine(app, contact, userMsgId, info, filterReason);
     else await deliver(app, contact, { message_id: userMsgId }, info, null);
+    // 转完一条删一条：deliver 失败会记成待补发，这里抛错时没转的留着下次再转
+    await app.db.prepare("DELETE FROM held_messages WHERE user_id = ? AND message_id = ?").bind(contact.userId, userMsgId).run();
+  }
+}
+
+/** 有管理员了，把空档期间存下的消息转过去。还没通过验证的人继续等验证。 */
+export async function releaseAllHeld(app: App): Promise<void> {
+  const rows = await app.db.prepare("SELECT DISTINCT user_id FROM held_messages").all<{ user_id: unknown }>();
+  for (const row of rows) {
+    const contact = await getContact(app, num(row.user_id));
+    if (contact && !needsVerification(app, contact)) await releaseHeld(app, contact);
   }
 }
 
@@ -161,6 +172,9 @@ async function keywordReply(app: App, contact: Contact, text: string): Promise<b
   return false;
 }
 
+// 每条消息都回文字，对方会嫌烦。送达靠消息上的 👌，文字回执只在第一次和隔了很久再来时发
+const RECEIPT_COOLDOWN = 30 * 86_400;
+
 async function autoReply(app: App, contact: Contact, text: string, delivered: boolean): Promise<void> {
   const now = app.now();
   if (!delivered) {
@@ -175,7 +189,7 @@ async function autoReply(app: App, contact: Contact, text: string, delivered: bo
     return;
   }
   if (!app.settings.receiptEnabled || contact.unread > 0) return;
-  if (contact.lastReceiptAt !== null && now - contact.lastReceiptAt < AUTO_REPLY_COOLDOWN) return;
+  if (contact.lastReceiptAt !== null && now - contact.lastReceiptAt < RECEIPT_COOLDOWN) return;
   await app.tg.call("sendMessage", { chat_id: contact.userId, text: app.settings.receipt });
   await app.db.prepare("UPDATE contacts SET last_receipt_at = ? WHERE user_id = ?").bind(now, contact.userId).run();
 }
@@ -202,7 +216,14 @@ export async function handleContactMessage(app: App, message: Message, user: Use
   if (isNew) await bumpDaily(app, "new_contacts").run();
   const isStart = startPayload(message.text);
   if (app.settings.ownerId === null) {
-    if (isStart) await app.tg.call("sendMessage", { chat_id: user.id, text: "这个机器人还在设置中，暂时收不到消息。" });
+    // 换管理员的空档里客户的消息不能丢：先存着，有人绑定后转过去
+    if (isStart) {
+      await app.tg.call("sendMessage", { chat_id: user.id, text: "这个机器人还在设置中，发的消息会先存着，设置好后转过去。" });
+    } else if (contact.blockedAt === null) {
+      const held = await app.db.prepare("SELECT COUNT(*) AS n FROM held_messages WHERE user_id = ?").bind(user.id).first<{ n: unknown }>();
+      await holdForVerification(app, contact, message, describe(message));
+      if (num(held?.n) === 0) await app.tg.call("sendMessage", { chat_id: user.id, text: "消息已保存，这边设置好后会转过去，不用重发。" });
+    }
     return;
   }
   if (contact.blockedAt !== null) return;
@@ -216,12 +237,15 @@ export async function handleContactMessage(app: App, message: Message, user: Use
       return;
     }
     if (!isStart) await holdForVerification(app, contact, message, info);
-    if (!challengePending(app, contact)) {
+    // 对方清空聊天后点开始，旧题已经看不到了，要重发
+    if (!challengePending(app, contact) || isStart) {
       if (isStart) await app.tg.call("sendMessage", { chat_id: user.id, text: app.settings.welcome });
       await sendChallenge(app, contact);
     }
     return;
   }
+  // 关掉验证或设成免验证后，之前暂存的消息要转过去
+  await releaseHeld(app, contact);
   if (isStart) {
     await app.tg.call("sendMessage", { chat_id: user.id, text: app.settings.welcome });
     return;
@@ -237,6 +261,7 @@ export async function handleContactMessage(app: App, message: Message, user: Use
 
   if (message.media_group_id) {
     await bufferAlbum(app, { message, info, groupId: message.media_group_id, direction: "in", userId: user.id, staffId: null });
+    if (app.settings.receiptEnabled) await reactOk(app, message, "👌");
     return;
   }
 
@@ -246,6 +271,7 @@ export async function handleContactMessage(app: App, message: Message, user: Use
     quoteId = quoted?.deskMsgId ?? null;
   }
   const delivered = await deliver(app, contact, message, info, quoteId);
+  if (delivered && app.settings.receiptEnabled) await reactOk(app, message, "👌");
   try {
     await autoReply(app, contact, info.text, delivered);
   } catch (error) {

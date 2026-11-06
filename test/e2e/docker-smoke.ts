@@ -160,6 +160,10 @@ const otherBackup = await sudo(`tgbot ${OTHER_NAME} backup`);
 check("按名字备份，文件名带名字", otherBackup.code === 0 && otherBackup.out.includes(`relay-${OTHER_NAME}-`), otherBackup.out);
 
 // 网页管理是可选的：装完再开，随机密码只显示一次
+const noDns = await sudo("tgbot web on no-such-host-for-test.invalid");
+check("域名没解析时退回到能打开的方式，不会卡住", noDns.code === 0 && noDns.out.includes("还没有解析") && noDns.out.includes("账号：admin"), noDns.out);
+const fallbackPassword = /密码：([0-9a-f]+)/.exec(noDns.out)?.[1] ?? "";
+await sudo("tgbot web off");
 const notEnabled = await sudo("tgbot web");
 check("没开时 tgbot web 说怎么开", notEnabled.code === 0 && notEnabled.out.includes("tgbot web on"), notEnabled.out);
 const badDomain = await sudo("tgbot web on 'bad domain'");
@@ -167,8 +171,8 @@ check("不合法的域名被拒绝", badDomain.code !== 0 && badDomain.out.inclu
 const caddyConfig = await sudo(`cd ${DIR} && WEB_DOMAIN=bot.example.com docker compose -f docker-compose.yml -f docker-compose.caddy.yml config --quiet && test -f Caddyfile && echo CONFIG_OK`);
 check("Let's Encrypt 这套配置文件有效", caddyConfig.out.includes("CONFIG_OK"), caddyConfig.out);
 const webOn = await sudo("tgbot web on");
-check("tgbot web on 成功并给出密码", webOn.code === 0 && webOn.out.includes("账号：admin"), webOn.out);
-const passwordLine = /密码：([0-9a-f]+)/.exec(webOn.out)?.[1] ?? "";
+check("再开不换密码", webOn.code === 0 && webOn.out.includes("之前设的账号密码"), webOn.out);
+const passwordLine = fallbackPassword;
 check(".env 里没有网页密码", passwordLine !== "" && !execSync(`sudo cat ${DIR}/.env`, { encoding: "utf8" }).includes(passwordLine));
 const webPort = execSync(`sudo sed -n 's/^WEB_PORT=//p' ${DIR}/.env`, { encoding: "utf8" }).trim();
 await sleep(3000);
@@ -179,6 +183,13 @@ check("网页没登录拿不到列表", webAnon.out.trim() === "401", webAnon.ou
 const webInfo = await sudo("tgbot web");
 check("tgbot web 显示地址", webInfo.code === 0 && webInfo.out.includes(`:${webPort}`), webInfo.out);
 check("开网页时机器人的数据还在", await hasContact(OTHER_DB, 6001));
+
+// Caddy 这一段：CI 拿不到真实证书，用 Caddy 的内部 CA 验证 域名 → Caddy → 机器人 这条路是通的
+const caddyTest = await sudo(`cd ${DIR} && cp Caddyfile /tmp/Caddyfile.real && printf '{$WEB_DOMAIN} {\\n\\ttls internal\\n\\treverse_proxy https://bot:8443 {\\n\\t\\ttransport http {\\n\\t\\t\\ttls_insecure_skip_verify\\n\\t\\t}\\n\\t}\\n}\\n' > Caddyfile; sed -i 's/^COMPOSE_FILE=.*/COMPOSE_FILE=docker-compose.yml:docker-compose.caddy.yml/; /^WEB_DOMAIN=/d' .env; echo WEB_DOMAIN=bot.example.com >> .env; docker compose up -d --remove-orphans 2>&1 | tail -2; sleep 12; curl -sk --max-time 10 --resolve bot.example.com:443:127.0.0.1 -o /dev/null -w 'code=%{http_code}' https://bot.example.com/api/bots; cp /tmp/Caddyfile.real Caddyfile`);
+check("域名经 Caddy 能访问到网页接口", caddyTest.out.includes("code=401"), caddyTest.out);
+const backToPort = await sudo("tgbot web on");
+check("从域名方式切回端口方式", backToPort.code === 0 && !execSync("sudo docker ps --format '{{.Names}}'", { encoding: "utf8" }).includes("caddy"), backToPort.out);
+await sleep(5000);
 
 const updatedAll = await sudo("tgbot update");
 check("tgbot update 后两个机器人都在", updatedAll.code === 0 && updatedAll.out.includes("已连上 Telegram"), updatedAll.out);

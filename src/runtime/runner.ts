@@ -34,6 +34,7 @@ export interface RunningBot {
 
 export function startBot(spec: BotSpec): RunningBot {
   const prefix = spec.label ? `[${spec.label}] ` : "";
+  // 数据库打不开只影响这一个机器人，由调用方接住
   const db = sqliteDb(spec.dbFile);
   const tg = createTelegram({ token: spec.token, apiBase: spec.apiBase, maxRetryAfter: 30 });
   const pollClient = createTelegram({ token: spec.token, apiBase: spec.apiBase, timeoutMs: (POLL_TIMEOUT_SECONDS + 15) * 1000 });
@@ -43,7 +44,10 @@ export function startBot(spec: BotSpec): RunningBot {
   let state: "connecting" | "online" | "failed" = "connecting";
   let timer: ReturnType<typeof setInterval> | undefined;
 
+  let tickDone: Promise<unknown> = Promise.resolve();
+
   const buildApp = async (): Promise<App> => ({
+    isStopping: () => stopping,
     db,
     tg,
     settings: await loadSettings(db),
@@ -121,6 +125,7 @@ export function startBot(spec: BotSpec): RunningBot {
         }
         if (error instanceof TelegramError && error.code === 401) {
           state = "failed";
+          clearInterval(timer);
           spec.onFatal(`${prefix}Token 已失效（401）。到 @BotFather 拿新的再更换。`);
           return;
         }
@@ -132,12 +137,12 @@ export function startBot(spec: BotSpec): RunningBot {
   };
 
   const done = (async () => {
-    if (!(await connect())) return;
+    if (!(await connect()) || stopping) return;
     let ticking = false;
     timer = setInterval(() => {
       if (ticking) return;
       ticking = true;
-      buildApp()
+      tickDone = buildApp()
         .then((app) => tick(app))
         .catch((error: unknown) => {
           console.error(`${prefix}定时任务失败：`, error instanceof Error ? error.message : String(error));
@@ -160,7 +165,7 @@ export function startBot(spec: BotSpec): RunningBot {
       // 长轮询挂着时不等它返回，最多再多收一次，下次重新确认
       await Promise.race([done, sleep(2000)]);
       for (let waited = 0; handling && waited < 100; waited++) await sleep(100);
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled([...pending, tickDone]);
       try {
         db.close();
       } catch (error) {

@@ -200,6 +200,10 @@ async function testWeb(fake: FakeServer): Promise<void> {
     check("登录成功，Cookie 带安全属性", login.status === 200 && /HttpOnly; Secure; SameSite=Strict/.test(login.setCookie), login.setCookie);
     cookie = login.setCookie.split(";")[0] ?? "";
 
+    const nullOrigin = await call("POST", "/api/login", { user: "x", password: "y" }, { origin: "null" });
+    check("带奇怪 Origin 的请求被拒绝，进程不崩", nullOrigin.status === 403 && node.exitCode === null, nullOrigin.raw);
+    const weirdPath = await call("GET", "//");
+    check("奇怪路径的请求不会把进程打崩", weirdPath.status >= 400 && node.exitCode === null, weirdPath.status);
     check("跨站来源的写操作被拒绝", (await call("POST", "/api/bots", { tokens: WEB_TOKEN }, { origin: "https://evil.example" })).status === 403);
     const added = await call("POST", "/api/bots", { tokens: `${WEB_TOKEN}\n999:bad` });
     const results = added.data.results as { ok: boolean }[];
@@ -221,11 +225,15 @@ async function testWeb(fake: FakeServer): Promise<void> {
     check("用户名不对时不会把现有管理员清掉", bad.status === 400 && still.raw.includes('"bound":true'), bad.raw);
     const assign = await call("POST", "/api/bots/friend-bot/assign", { user: "@ZhangSan" });
     check("网页能重新指定管理员", assign.status === 200 && assign.data.claimUser === "zhangsan" && assign.data.bound === false, assign.raw);
+
     await sleep(200);
     friend.calls.length = 0;
     friend.queue.push(textUpdate(BOB, "你好", 22));
     await sleep(700);
     check("指定后别人看不到按钮", !friend.named("sendMessage").some((m) => String(m.text).includes("还没有管理员")));
+    const blank = await call("POST", "/api/bots/friend-bot/assign", { user: "" });
+    check("已有联系人的机器人留空时只给链接，不开放给谁先点算谁", blank.data.claimMode === "link" && String(blank.data.link).includes("start=claim_"), blank.raw);
+
 
     const saved = await call("POST", "/api/bots/friend-bot/settings", { welcome: "朋友的欢迎语", verify: false });
     check("网页能改欢迎语和验证开关", saved.data.welcome === "朋友的欢迎语" && saved.data.verify === false, saved.raw);
@@ -236,11 +244,21 @@ async function testWeb(fake: FakeServer): Promise<void> {
 
     const wrongCurrent = await call("POST", "/api/password", { current: "nope-nope", password: "another-password" });
     check("改密码要当前密码", wrongCurrent.status === 400);
+    // 在别的进程改密码（tgbot web-password）：旧登录立刻失效
+    const reset = spawn("node", [entry, "web-auth"], { env: { ...process.env, ...env }, stdio: ["pipe", "ignore", "ignore"] });
+    reset.stdin.end("tester\\nlocal-e2e-password-2\\n".replaceAll("\\n", "\n"));
+    await waitFor("重设密码", () => reset.exitCode !== null);
+    check("服务器上重设密码后，旧登录失效", (await call("GET", "/api/bots")).status === 401);
+    const relogin = await call("POST", "/api/login", { user: "tester", password: "local-e2e-password-2" });
+    cookie = relogin.setCookie.split(";")[0] ?? "";
+    // 一批并发的错密码只有前几个进得了校验
+    const flood = await Promise.all(Array.from({ length: 30 }, () => call("POST", "/api/login", { user: "tester", password: "wrong-password" }, { cookie: "" })));
+    check("并发错密码也会被锁定", flood.filter((item) => item.status === 401).length <= 5 && flood.filter((item) => item.status === 429).length >= 25, flood.map((item) => item.status).join());
+    await call("POST", "/api/login", { user: "tester", password: "local-e2e-password-2" });
     const logout = await call("POST", "/api/logout");
     cookie = "";
     check("退出后不能再用", logout.status === 200 && (await call("GET", "/api/bots")).status === 401);
-    for (let i = 0; i < 5; i++) await call("POST", "/api/login", { user: "tester", password: "wrong-password" });
-    check("连错 5 次被锁", (await call("POST", "/api/login", { user: "tester", password: "local-e2e-password" })).status === 429);
+    check("连错 5 次被锁", (await call("POST", "/api/login", { user: "tester", password: "local-e2e-password-2" })).status === 429);
     check("日志里没有 Token 和密码", !log.join("").includes(WEB_TOKEN) && !log.join("").includes("local-e2e-password"));
   } finally {
     node.kill("SIGKILL");

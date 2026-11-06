@@ -2,7 +2,7 @@
 import type { Message } from "@grammyjs/types";
 import type { App } from "./app.ts";
 import { num, str } from "./db.ts";
-import { clipHtml, escapeHtml } from "./message-info.ts";
+import { clipChars, clipHtml, escapeHtml } from "./message-info.ts";
 import type { Settings } from "./settings.ts";
 import { saveSetting } from "./settings.ts";
 
@@ -20,13 +20,16 @@ export const backRow = () => [{ text: "🏠 返回首页", callback_data: "p:mai
 export const CANCEL_KEYBOARD = { inline_keyboard: [[{ text: "❌ 取消", callback_data: "cancel" }]] };
 
 /** 面板首页：只放每天都用的，计数写在按钮上，一眼看到哪里有事。不常用的收进「更多」。 */
-export async function renderPanel(app: App, owner: boolean): Promise<Menu> {
+export async function renderPanel(app: App, owner: boolean, staffId?: number): Promise<Menu> {
   const counts = await app.db
     .prepare("SELECT (SELECT COUNT(*) FROM contacts WHERE unread > 0) AS unread, (SELECT COUNT(*) FROM messages WHERE status = 'filtered') AS filtered")
     .first<{ unread: unknown; filtered: unknown }>();
   const unread = num(counts?.unread);
   const filtered = num(counts?.filtered);
+  // 选中的人写在最上面，翻聊天记录找不到当时那张卡片时也能看到现在在回谁
+  const selected = staffId === undefined || app.settings.deskMode === "group" ? null : await app.db.prepare("SELECT c.user_id AS id, c.first_name AS name FROM staff_state s JOIN contacts c ON c.user_id = s.selected_user_id WHERE s.staff_id = ?").bind(staffId).first<{ id: unknown; name: unknown }>();
   const rows: Button[][] = [
+    ...(selected ? [[{ text: clipChars(`✍️ 正在回复：${str(selected.name)}`, 40), callback_data: `open:${num(selected.id)}` }]] : []),
     [{ text: unread > 0 ? `💬 最近会话（${unread} 人未读）` : "💬 最近会话", callback_data: "list:0" }, { text: "🔍 搜索联系人", callback_data: "srch" }],
     [{ text: "⚡️ 快捷回复", callback_data: "qm:0" }, { text: filtered > 0 ? `🛡 隔离区（${filtered}）` : "🛡 隔离区", callback_data: "filtered:0" }],
   ];
@@ -41,7 +44,7 @@ export async function renderPanel(app: App, owner: boolean): Promise<Menu> {
   }
   rows.push([{ text: "❓ 怎么回复消息", callback_data: "p:help" }]);
   return {
-    text: "<b>🏠 管理面板</b>\n点下面的按钮操作。\n\n回复别人：直接回复转来的那条消息就行，对方看不到你的账号。",
+    text: "<b>🏠 管理面板</b>\n点下面的按钮操作。\n\n回复别人：长按转来的消息点「回复」；消息被顶上去了，就从「最近会话」里找到他。对方看不到你的账号。",
     keyboard: { inline_keyboard: rows },
   };
 }
@@ -104,7 +107,7 @@ export function renderMenu(app: App, page: string): Menu {
         text:
           "<b>💬 自动回复</b>\n\n" +
           `<b>欢迎语</b>（/start 时发送）：\n${clipHtml(s.welcome, 900)}\n\n` +
-          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：\n${clipHtml(s.receipt, 900)}\n\n` +
+          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：每条消息上打 👌，只在第一次和隔了 30 天才发这句话：\n${clipHtml(s.receipt, 900)}\n\n` +
           `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${clipHtml(s.offlineMessage, 900)}`,
         keyboard: {
           inline_keyboard: [
@@ -251,28 +254,42 @@ export const INPUTS: Record<string, InputSpec> = {
 
 const AWAITING_TTL = 10 * 60;
 
-export async function setAwaiting(app: App, staffId: number, what: string): Promise<void> {
-  await app.db
-    .prepare("INSERT INTO staff_state(staff_id, awaiting, awaiting_at) VALUES(?, ?, ?) ON CONFLICT(staff_id) DO UPDATE SET awaiting = excluded.awaiting, awaiting_at = excluded.awaiting_at")
-    .bind(staffId, what, app.now())
-    .run();
+export interface AwaitScope {
+  chatId: number;
+  threadId: number | undefined;
 }
 
-export async function clearAwaiting(app: App, staffId: number): Promise<void> {
-  await app.db.prepare("UPDATE staff_state SET awaiting = NULL, awaiting_at = NULL WHERE staff_id = ?").bind(staffId).run();
+/**
+ * 记下在等管理员输入什么，以及在哪个聊天和话题等。换了地方发的话是给客户的，不能当成输入。
+ * 群里同时记在群 ID 下：匿名管理员点按钮时是真人 ID，发消息时身份却是群。
+ */
+export async function setAwaiting(app: App, staffId: number, what: string, scope: AwaitScope): Promise<void> {
+  const value = `${scope.chatId}:${scope.threadId ?? ""}|${what}`;
+  for (const id of scope.chatId < 0 ? [staffId, scope.chatId] : [staffId]) {
+    await app.db
+      .prepare("INSERT INTO staff_state(staff_id, awaiting, awaiting_at) VALUES(?, ?, ?) ON CONFLICT(staff_id) DO UPDATE SET awaiting = excluded.awaiting, awaiting_at = excluded.awaiting_at")
+      .bind(id, value, app.now())
+      .run();
+  }
 }
 
-/** 还在等管理员输入的内容；没有或已过期返回 null。 */
-export async function currentAwaiting(app: App, staffId: number): Promise<string | null> {
+export async function clearAwaiting(app: App, staffId: number, chatId: number): Promise<void> {
+  await app.db.prepare("UPDATE staff_state SET awaiting = NULL, awaiting_at = NULL WHERE staff_id IN (?, ?)").bind(staffId, chatId).run();
+}
+
+/** 还在等这个人在这个位置输入的内容；没有、已过期或换了地方都返回 null。 */
+export async function currentAwaiting(app: App, staffId: number, message: Message): Promise<string | null> {
   const row = await app.db.prepare("SELECT awaiting, awaiting_at FROM staff_state WHERE staff_id = ?").bind(staffId).first<{ awaiting: unknown; awaiting_at: unknown }>();
-  const awaiting = str(row?.awaiting);
-  if (!awaiting || typeof row?.awaiting_at !== "number" || app.now() - row.awaiting_at > AWAITING_TTL) return null;
-  return awaiting;
+  const value = str(row?.awaiting);
+  if (!value || typeof row?.awaiting_at !== "number" || app.now() - row.awaiting_at > AWAITING_TTL) return null;
+  const split = value.indexOf("|");
+  if (value.slice(0, split) !== `${message.chat.id}:${message.message_thread_id ?? ""}`) return null;
+  return value.slice(split + 1);
 }
 
 /** 管理员刚点过「改 xx」，下一条消息当作输入。返回 true 表示已处理。 */
 export async function handleAwaitingInput(app: App, message: Message, staffId: number): Promise<boolean> {
-  const awaiting = await currentAwaiting(app, staffId);
+  const awaiting = await currentAwaiting(app, staffId, message);
   if (!awaiting) return false;
   const text = message.text ?? "";
   const reply = (body: string, keyboard?: unknown) =>
@@ -283,13 +300,13 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
       ...(keyboard === undefined ? {} : { reply_markup: keyboard }),
     });
   if (text === "/cancel") {
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     await reply("已取消。");
     return true;
   }
   // 打了别的命令就是不想继续这一步了，否则之后发的话会被当成输入
   if (text.startsWith("/")) {
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     return false;
   }
   if (!text) {
@@ -299,17 +316,17 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
   if (awaiting.startsWith("note:")) {
     const userId = Number(awaiting.slice(5));
     if (!Number.isSafeInteger(userId)) {
-      await clearAwaiting(app, staffId);
+      await clearAwaiting(app, staffId, message.chat.id);
       return false;
     }
     await app.db.prepare("UPDATE contacts SET note = ? WHERE user_id = ?").bind(text.trim() === "0" ? "" : text.slice(0, 500), userId).run();
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     await reply("备注已保存。");
     return true;
   }
   const spec = INPUTS[awaiting];
   if (!spec) {
-    await clearAwaiting(app, staffId);
+    await clearAwaiting(app, staffId, message.chat.id);
     return false;
   }
   const failure = await spec.apply(app, text);
@@ -317,7 +334,7 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
     await reply(failure, CANCEL_KEYBOARD);
     return true;
   }
-  await clearAwaiting(app, staffId);
+  await clearAwaiting(app, staffId, message.chat.id);
   await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回设置", callback_data: "m:main" }]] });
   return true;
 }

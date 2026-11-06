@@ -1,4 +1,5 @@
-# 不用 Docker 时的 systemd 配置。放到 /etc/systemd/system/，按实际路径改 WorkingDirectory。
+# 不用 Docker 时的 systemd 配置，只适合跑一个机器人。放到 /etc/systemd/system/，按实际路径改 WorkingDirectory。
+# 这种方式没有 tgbot 命令和网页管理的账号设置。绑定方式在日志里：journalctl -u tg-botsx -e
 [Unit]
 Description=传声筒 Telegram 双向机器人
 After=network-online.target

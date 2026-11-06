@@ -27,6 +27,11 @@ known_bot() {
   run_node list </dev/null | cut -f1 | grep -qxF "$1"
 }
 
+# 不用 docker restart：它不会读改过的 .env，改了代理或端口不生效
+cmd_restart() {
+  compose up -d --force-recreate bot
+}
+
 cmd_status() {
   if [ -n "$NAME" ]; then
     run_node list </dev/null | grep -F "$NAME	" || true
@@ -151,9 +156,13 @@ cmd_token() {
     printf '%s\n' "$token" | run_node token "$NAME"
     return
   fi
-  # 同一个 Token 跑两份，两边都会被 Telegram 断开
-  if bot_running && [ "$(printf '%s\n' "$token" | run_node token-check)" = "used" ]; then
-    die "这个 Token 已经给别的机器人用了。"
+  if bot_running; then
+    case "$(printf '%s\n' "$token" | run_node token-check)" in
+      used) die "这个 Token 已经给别的机器人用了。同一个 Token 跑两份，两边都收不到消息。" ;;
+      invalid) die "Telegram 不认这个 Token，没有更换。到 @BotFather 发 /token 核对。" ;;
+      unreachable) printf '现在连不上 Telegram，没法校验这个 Token，先换上。\n' ;;
+      *) ;;
+    esac
   fi
   local updated
   umask 077
@@ -184,9 +193,16 @@ cmd_uninstall() {
   read -r -p "确认卸载？输入「卸载」继续: " confirm
   [ "$confirm" = "卸载" ] || { printf '已取消。\n'; return; }
   if [ "$answer" = "删除数据" ]; then
-    backup_all_if_possible
+    if bot_running; then
+      backup_all_if_possible
+      printf '已先备份到 %s/backups。\n' "$DIR"
+    else
+      printf '机器人没在运行，没法备份，删除后数据找不回来。\n'
+      read -r -p "确认不备份直接删除？输入「不备份」继续: " confirm
+      [ "$confirm" = "不备份" ] || { printf '已取消。先运行 tgbot restart，再卸载就能备份。\n'; return; }
+    fi
     compose down -v
-    printf '数据已删除。最后一份备份在 %s/backups，Token 还在 %s/.env，确认不需要后自己删掉这个目录。\n' "$DIR" "$DIR"
+    printf '数据已删除。Token 还在 %s/.env，确认不需要后自己删掉 %s 这个目录。\n' "$DIR" "$DIR"
     rm -f /usr/local/bin/tgbot
     rm -rf "$DIR/src" "$DIR/package.json" "$DIR/Dockerfile" "$DIR/.dockerignore" "$DIR/.env.example" "$DIR/docker-compose.yml" "$DIR/docker-compose.web.yml" "$DIR/docker-compose.caddy.yml" "$DIR/Caddyfile"
   else
@@ -197,7 +213,7 @@ cmd_uninstall() {
 }
 
 web_enabled() {
-  grep -q '^COMPOSE_FILE=' "$DIR/.env"
+  grep -q '^COMPOSE_FILE=.*\(web\|caddy\)' "$DIR/.env"
 }
 
 set_env() {
@@ -226,6 +242,12 @@ cmd_web() {
   url="$(sed -n 's/^WEB_URL=//p' "$DIR/.env" | head -n 1)"
   domain="$(sed -n 's/^WEB_DOMAIN=//p' "$DIR/.env" | head -n 1)"
   if [ -n "$domain" ]; then url="https://$domain"; fi
+  if [ -n "$domain" ]; then
+    local expiry
+    expiry="$(cert_expiry "$domain" || true)"
+    printf '地址：%s\n证书：Let'"'"'s Encrypt，%s，到期前会自动续。\n' "$url" "${expiry:+到期时间 $expiry}"
+    return
+  fi
   if [ -n "$url" ]; then
     printf '地址：%s\n' "$url"
     return
@@ -233,13 +255,45 @@ cmd_web() {
   ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | cut -d' ' -f1)"
   printf '地址：https://%s:%s\n' "$ip" "$port"
   printf '用的是自签名证书，第一次打开浏览器会提示不安全，点「高级」再继续就行，连接是加密的。\n'
+  printf '打不开的话，到云服务商的防火墙（安全组）放行 TCP %s 端口。\n' "$port"
 }
 
 port_taken() {
   ss -H -ltn "sport = :$1" 2>/dev/null | grep -q .
 }
 
-# 不带域名：开一个随机端口，用程序自签的证书。带域名：Caddy 自动申请并续期 Let's Encrypt 证书
+# 域名有没有解析。解析到别的 IP 不算失败：可能是放在 Cloudflare 这类代理后面，能不能申请到证书以实际结果为准
+check_domain() {
+  local domain="$1" resolved ip
+  resolved="$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
+  if [ -z "$resolved" ]; then
+    printf '域名 %s 还没有解析。到域名服务商那里加一条 A 记录，指向这台服务器。\n' "$domain"
+    return 1
+  fi
+  ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  case " $resolved " in
+    *" $ip "*) ;;
+    *) printf '提醒：%s 解析到 %s，这台服务器的 IP 是 %s。如果不是用了代理，证书会申请失败。\n' "$domain" "$resolved" "${ip:-未知}" ;;
+  esac
+}
+
+# 用真实的证书校验连本机，确认证书已经签下来，不依赖服务器能不能访问自己的公网地址
+cert_ready() {
+  curl -fsS --max-time 5 --resolve "$1:443:127.0.0.1" -o /dev/null "https://$1/" 2>/dev/null
+}
+
+# 证书的到期时间，用来告诉人续期在正常工作
+cert_expiry() {
+  curl -sSv --max-time 5 --resolve "$1:443:127.0.0.1" -o /dev/null "https://$1/" 2>&1 | sed -n 's/^\*  *expire date: //p' | head -n 1
+}
+
+# 申请不到证书时退回到随机端口加自签名证书：网页要能打开，不能让人卡在这一步
+fall_back_to_port() {
+  printf '\n先用没有域名的方式把网页开起来。问题解决后运行 tgbot web on %s 再试一次。\n' "$1"
+  cmd_web_on ""
+}
+
+# 带域名：Caddy 自动申请 Let's Encrypt 证书，到期前自动续，不用人管。不带域名：开一个随机端口，用程序自签的证书
 cmd_web_on() {
   local domain="${1:-}"
   if [ -n "$domain" ]; then
@@ -247,20 +301,30 @@ cmd_web_on() {
     local p
     for p in 80 443; do
       if port_taken "$p" && ! compose ps --status running --services 2>/dev/null | grep -qx caddy; then
-        die "$p 端口被别的程序占着，Let's Encrypt 需要它。可以不带域名运行 tgbot web on，或者放在 Cloudflare 代理、自己的 nginx 后面。"
+        printf '%s 端口被别的程序占着，申请证书需要它。可以停掉那个程序，或者把网页放在 Cloudflare 代理、自己的 nginx 后面（见 README）。\n' "$p"
+        fall_back_to_port "$domain"
+        return
       fi
     done
+    if ! check_domain "$domain"; then
+      fall_back_to_port "$domain"
+      return
+    fi
     set_env WEB_DOMAIN "$domain"
     set_env WEB_URL ""
     set_env COMPOSE_FILE "docker-compose.yml:docker-compose.caddy.yml"
   else
-    if ! grep -q '^WEB_PORT=' "$DIR/.env"; then
+    # 显式传的端口要写回 .env，否则下次更新又变回去
+    if [ -n "${WEB_PORT:-}" ]; then
+      set_env WEB_PORT "$WEB_PORT"
+    elif ! grep -q '^WEB_PORT=' "$DIR/.env"; then
       local port
-      port="${WEB_PORT:-$(( ( $(od -An -N2 -tu2 /dev/urandom) % 40000 ) + 20000 ))}"
-      port_taken "$port" && die "$port 端口被占用了，再运行一次换一个。"
+      port="$(( ( $(od -An -N2 -tu2 /dev/urandom) % 40000 ) + 20000 ))"
+      if port_taken "$port"; then die "$port 端口被占用了，再运行一次换一个。"; fi
       set_env WEB_PORT "$port"
     fi
     if [ -n "${WEB_URL:-}" ]; then set_env WEB_URL "$WEB_URL"; fi
+    if [ -n "${WEB_IP_HEADER:-}" ]; then set_env WEB_IP_HEADER "$WEB_IP_HEADER"; fi
     set_env WEB_DOMAIN ""
     set_env COMPOSE_FILE "docker-compose.yml:docker-compose.web.yml"
   fi
@@ -271,25 +335,54 @@ cmd_web_on() {
     waited=$((waited + 1))
     [ "$waited" -lt 30 ] || die "容器没有起来，运行 tgbot logs 看原因。"
   done
-  cmd_web
-  # 第一次开随机生成账号密码，只显示这一次。已有账号时不动
-  if compose exec -T bot test -f /data/web/auth.json </dev/null; then
-    printf '登录用你之前设的账号密码，忘了运行 tgbot web-password 重设。\n'
-    return
+  ensure_web_login
+  if [ -n "$domain" ]; then
+    printf '正在申请证书，通常不到一分钟…\n'
+    waited=0
+    until cert_ready "$domain"; do
+      sleep 3
+      waited=$((waited + 3))
+      if [ "$waited" -ge 120 ]; then
+        printf '\n两分钟内没申请到证书。Caddy 最后的日志：\n'
+        compose logs --tail=8 --no-log-prefix caddy 2>/dev/null | cut -c1-300 || true
+        printf '\n最常见的原因：云服务商的防火墙没放行 80 和 443 端口；域名解析还没生效，或者解析到了别的 IP。\n'
+        fall_back_to_port "$domain"
+        return
+      fi
+    done
+    printf '证书申请好了，到期前会自动续。\n'
   fi
-  local password
-  password="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
-  printf 'admin\n%s\n' "$password" | run_node web-auth >/dev/null
-  printf '账号：admin\n密码：%s\n密码只显示这一次。要改成自己的，运行 tgbot web-password，或登录后在网页里改。\n' "$password"
+  cmd_web
+  show_first_password
+}
+
+WEB_FIRST_PASSWORD=""
+
+# 第一次开随机生成账号密码，只显示这一次。已有账号时不动
+ensure_web_login() {
+  if compose exec -T bot test -f /data/web/auth.json </dev/null; then
+    return 0
+  fi
+  WEB_FIRST_PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+  printf 'admin\n%s\n' "$WEB_FIRST_PASSWORD" | run_node web-auth >/dev/null
+}
+
+show_first_password() {
+  if [ -n "$WEB_FIRST_PASSWORD" ]; then
+    printf '账号：admin\n密码：%s\n密码只显示这一次。要改成自己的，运行 tgbot web-password，或登录后在网页里改。\n' "$WEB_FIRST_PASSWORD"
+  else
+    printf '登录用你之前设的账号密码，忘了运行 tgbot web-password 重设。\n'
+  fi
 }
 
 cmd_web_off() {
-  set_env COMPOSE_FILE ""
+  # 明确写上只用基础配置：只删掉的话，安装脚本会当成旧版本，更新时又把端口打开
+  set_env COMPOSE_FILE "docker-compose.yml"
   compose up -d --remove-orphans
   printf '网页管理已关闭，对外端口也关了。机器人照常运行。账号密码还留着，再开不用重设。\n'
 }
 
-# 账号密码只存哈希。忘了密码运行这个重设，会让所有已登录的设备重新登录前都失效
+# 账号密码只存哈希。重设后已登录的设备立刻失效，登录锁定也解开
 cmd_web_password() {
   need_running
   local user password
@@ -321,9 +414,9 @@ MENU
   case "$choice" in
     1) cmd_status ;;
     2) cmd_logs ;;
-    3) compose restart bot ;;
+    3) cmd_restart ;;
     4) cmd_update ;;
-    5) cmd_backup ;;
+    5) if [ -n "$NAME" ]; then cmd_backup; else backup_all_if_possible; fi ;;
     6) read -r -p "备份文件路径: " file; cmd_restore "$file" ;;
     7) run_node claim ${NAME:+"$NAME"} </dev/null ;;
     8) cmd_token ;;
@@ -341,11 +434,12 @@ usage() {
   tgbot add [名字 [对方的用户名]]   新增机器人，不写名字可以一次粘贴多个 Token
   tgbot list                       查看所有机器人
   tgbot web                        网页管理的地址
-  tgbot web on [域名]              开网页管理，带域名就自动申请 Let's Encrypt 证书
+  tgbot web on [域名]              开网页管理，带域名就自动申请并续期 Let's Encrypt 证书
   tgbot web off                    关网页管理，对外端口也关掉
   tgbot web-password               设置网页管理的账号和密码
   tgbot update                     更新（所有机器人一起）
-  tgbot restart                    重启（所有机器人一起）
+  tgbot restart                    重启（所有机器人一起），改了 .env 也用它
+  tgbot backup                     备份所有机器人的聊天数据
   tgbot [名字] [status|logs|backup|restore 文件|claim|token|uninstall]
 不写名字就是默认机器人。
 USAGE
@@ -375,9 +469,9 @@ case "${1:-}" in
   web-password) cmd_web_password ;;
   status) cmd_status ;;
   logs) cmd_logs ;;
-  restart) compose restart bot ;;
+  restart) cmd_restart ;;
   update) cmd_update ;;
-  backup) cmd_backup ;;
+  backup) if [ -n "$NAME" ]; then cmd_backup; else backup_all_if_possible; fi ;;
   restore) cmd_restore "${2:-}" ;;
   claim) need_running; run_node claim ${NAME:+"$NAME"} </dev/null ;;
   token) cmd_token ;;

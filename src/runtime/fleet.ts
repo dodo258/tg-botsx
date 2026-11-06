@@ -136,6 +136,8 @@ export interface BotInfo {
   username: string;
   bound: boolean;
   ownerName: string;
+  ownerUsername: string;
+  ownerId: number | null;
   claimOpen: boolean;
   claimMode: Settings["claimMode"];
   claimUser: string;
@@ -159,6 +161,8 @@ export async function describeBot(env: FleetEnv, name: string): Promise<BotInfo>
       username: settings.botUsername,
       bound,
       ownerName: settings.ownerName,
+      ownerUsername: settings.ownerUsername,
+      ownerId: settings.ownerId,
       claimOpen,
       claimMode: settings.claimMode,
       claimUser: settings.claimUser,
@@ -173,22 +177,27 @@ export async function describeBot(env: FleetEnv, name: string): Promise<BotInfo>
   }
 }
 
-/** 重新开放绑定。已有管理员时不动它，换人走 transferOwner。 */
-export async function reopenClaim(env: FleetEnv, name: string, options: AddOptions = {}): Promise<BotInfo> {
-  const claimUser = normalizeUsername(options.claimUser);
-  await withApp(env, name, readToken(env, name), async (app) => {
-    await createClaim(app, claimUser ? { mode: "user", user: claimUser } : { mode: "open" });
-  });
-  return await describeBot(env, name);
-}
-
-/** 清掉管理员，让机器人回到等人绑定的状态。聊天数据不动。 */
-export async function resetOwner(env: FleetEnv, name: string, options: AddOptions = {}): Promise<BotInfo> {
+/**
+ * 重新指定管理员。填了用户名，那个人私聊就绑定。留空时，新机器人谁先点算谁；
+ * 已经有联系人的机器人不能这样：老客户点一下就能读到别人的聊天记录，所以只给一个一次性链接。
+ * 聊天数据不动，旧管理员的话题群和选中状态要清掉，否则他的群还能继续收发。
+ */
+export async function assignOwner(env: FleetEnv, name: string, userInput: string | undefined): Promise<BotInfo> {
+  const claimUser = normalizeUsername(userInput);
+  if (claimUser && !/^[a-z0-9_]{3,32}$/.test(claimUser)) throw new Error("用户名只能有英文字母、数字和下划线，比如 @zhangsan。");
   const db = sqliteDb(dbPath(env, name));
   try {
-    await db.prepare("DELETE FROM settings WHERE key IN ('ownerId', 'ownerName')").run();
+    await migrate(db);
+    await db.prepare("DELETE FROM settings WHERE key IN ('ownerId', 'ownerName', 'ownerUsername', 'deskMode', 'groupId')").run();
+    await db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
+    await db.prepare("DELETE FROM staff_state").run();
   } finally {
     db.close();
   }
-  return await reopenClaim(env, name, options);
+  const before = await describeBot(env, name);
+  const options: ClaimOptions = claimUser ? { mode: "user", user: claimUser } : before.contacts > 0 ? { mode: "link" } : { mode: "open" };
+  await withApp(env, name, readToken(env, name), async (app) => {
+    await createClaim(app, options);
+  });
+  return await describeBot(env, name);
 }

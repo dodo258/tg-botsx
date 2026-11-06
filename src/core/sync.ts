@@ -32,6 +32,13 @@ export async function handleContactEdit(app: App, message: Message, userId: numb
   const contact = await getContact(app, userId);
   if (!contact) return;
   const info = describe(message);
+  // 被屏蔽的人不能靠编辑旧消息继续打扰
+  if (contact.blockedAt !== null) return;
+  // 换过管理员或客服台时，旧消息留在旧聊天里，不能再往那边发。只记下内容
+  if (stored.deskChatId !== deskChatId(app)) {
+    await saveEdit(app, stored, info.text, info.fileId);
+    return;
+  }
   const thread = contact.threadId === null ? {} : { message_thread_id: contact.threadId };
   const before = stored.text ?? "";
   const fileChanged = info.fileId !== "" && info.fileId !== (stored.fileId ?? "");
@@ -97,7 +104,7 @@ export async function handleReaction(app: App, update: MessageReactionUpdated): 
     }
   } else if (update.chat.type === "private") {
     const stored = await findByUserMsg(app, update.chat.id, update.message_id);
-    if (stored) {
+    if (stored && stored.deskChatId === deskChatId(app)) {
       chatId = stored.deskChatId;
       messageId = stored.deskMsgId;
     }

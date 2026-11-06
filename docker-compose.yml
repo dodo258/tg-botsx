@@ -4,6 +4,9 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
+    # 代理在服务器本机时，容器里用 host.docker.internal 连它
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - data:/data
     # 机器人只往外连 Telegram，不开端口，容器也不给多余权限。要网页管理时 tgbot web on 加上端口

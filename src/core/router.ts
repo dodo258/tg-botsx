@@ -10,7 +10,7 @@ import { isServiceMessage } from "./message-info.ts";
 import { handleStaffMessage } from "./outbound.ts";
 import { handleInput } from "./panel.ts";
 import { saveSetting } from "./settings.ts";
-import { firstClaimOpen, sendClaimPrompt, tryClaim } from "./setup.ts";
+import { claimIfDesignated, firstClaimOpen, sendClaimPrompt, tryClaim } from "./setup.ts";
 import { handleContactEdit, handleReaction, handleStaffEdit } from "./sync.ts";
 
 function staffIdOf(message: Message): number | null {
@@ -60,6 +60,7 @@ async function routeMessage(app: App, message: Message): Promise<void> {
     const user = message.from;
     if (!user || user.is_bot) return;
     if (await tryClaim(app, message)) return;
+    if (await claimIfDesignated(app, user, chat.id)) return;
     if (firstClaimOpen(app, user)) {
       await sendClaimPrompt(app, chat.id);
       return;

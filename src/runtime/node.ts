@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import type { App } from "../core/app.ts";
 import { loadSettings } from "../core/settings.ts";
 import { claimLink, createClaim, fetchBot } from "../core/setup.ts";
-import { createTelegram } from "../core/telegram.ts";
+import { createTelegram, TelegramError } from "../core/telegram.ts";
 import { cryptoRng } from "../core/verify.ts";
 import { addBot, allNames, dbPath, DEFAULT_NAME, describeBot, extraNames, readToken, removeBot, replaceToken } from "./fleet.ts";
 import type { BotInfo, FleetEnv } from "./fleet.ts";
@@ -40,6 +40,10 @@ async function printClaim(app: App, username: string): Promise<void> {
     console.log(`\n用新管理员的账号打开这个链接并点开始（10 分钟内有效）：\n${link}\n`);
     return;
   }
+  if (s.claimExpiresAt <= app.now()) {
+    console.log("\n绑定已过期。运行 tgbot claim 重新生成。\n");
+    return;
+  }
   const pair = s.claimPair ? `再点和这个一样的图案：\n配对图案：${s.claimPair}\n` : "配对按钮已失效，用下面的链接。\n";
   console.log(`\n用要当管理员的账号打开 @${username}，点开始，${pair}也可以直接打开这个链接，不用点图案：\n${link}\n`);
 }
@@ -55,7 +59,7 @@ function readStdin(): Promise<string[]> {
 const readStdinLine = async () => (await readStdin())[0] ?? "";
 
 function infoLine(info: BotInfo): string {
-  const state = info.bound ? `已绑定 ${info.ownerName || ""}`.trim() : info.claimOpen ? (info.claimMode === "user" ? `等 @${info.claimUser} 绑定` : info.claimMode === "pair" ? `等人绑定，配对图案 ${info.claimPair || "已失效"}` : "等人绑定") : "绑定已过期";
+  const state = info.bound ? `已绑定 ${info.ownerName || ""}`.trim() : info.claimOpen ? (info.claimMode === "user" ? `等 @${info.claimUser} 绑定` : info.claimMode === "pair" ? `等人绑定，配对图案 ${info.claimPair || "已失效"}` : info.claimMode === "link" ? "等人用链接绑定" : "等人绑定") : "绑定已过期";
   return [info.name, info.username ? `@${info.username}` : "-", state].join("\t");
 }
 
@@ -111,7 +115,15 @@ if (command !== undefined) {
         break;
       case "token-check": {
         const token = await readStdinLine();
-        console.log(allNames(env).some((name) => name !== DEFAULT_NAME && readToken(env, name) === token) ? "used" : "free");
+        if (allNames(env).some((name) => name !== DEFAULT_NAME && readToken(env, name) === token)) {
+          console.log("used");
+          break;
+        }
+        const result = await createTelegram({ token, apiBase: env.apiBase }).call("getMe").then(
+          () => "ok",
+          (error: unknown) => (error instanceof TelegramError && error.code === 401 ? "invalid" : "unreachable"),
+        );
+        console.log(result);
         break;
       }
       case "web-auth": {
@@ -141,28 +153,41 @@ if (!env.defaultToken && extraNames(env).length === 0 && !webPort) {
 const running = new Map<string, RunningBot>();
 let stopping = false;
 
+const broken = new Map<string, string>();
+
 function launch(name: string, token: string): void {
   const isDefault = name === DEFAULT_NAME;
-  running.set(
-    name,
-    startBot({
+  // 一个机器人的数据库坏了，只有它起不来，不能连累别的
+  if (broken.get(name) === token) return;
+  try {
+    running.set(name, startOne(name, token, isDefault));
+    broken.delete(name);
+  } catch (error) {
+    broken.set(name, token);
+    console.error(`机器人 ${name} 启动失败：`, error instanceof Error ? error.message : String(error));
+    if (isDefault && extraNames(env).length === 0 && !webPort) process.exit(1);
+  }
+}
+
+function startOne(name: string, token: string, isDefault: boolean): RunningBot {
+  return startBot({
       label: isDefault ? "" : name,
       token,
       dbFile: dbPath(env, name),
       apiBase: env.apiBase,
       async onConnected(app, username) {
-        // 重启不换绑定方式：已经告诉朋友的图案和链接要继续能用
         if (app.settings.ownerId !== null) return;
-        if (app.settings.claimExpiresAt <= app.now() || !app.settings.claimCode) await createClaim(app, isDefault ? undefined : { mode: "open" });
+        // 只有从没生成过才生成。重启不能换绑定方式，也不能把过期的绑定重新打开：
+        // 指定了用户名的机器人过期后要是自动变成谁先点算谁，就等于谁都能抢
+        if (!app.settings.claimCode && app.settings.claimExpiresAt === 0) await createClaim(app, isDefault ? undefined : { mode: "open" });
         if (isDefault) await printClaim(app, username);
       },
       onFatal(message) {
         console.error(message);
         // 只有默认一个机器人时直接退出，和以前一样让人一眼看到；有别的机器人时不能连累它们
-        if (isDefault && extraNames(env).length === 0) process.exit(1);
+        if (isDefault && extraNames(env).length === 0 && !webPort) process.exit(1);
       },
-    }),
-  );
+  });
 }
 
 /** 对照磁盘上的 Token 文件启停机器人，新增删除都不用重启进程。 */
@@ -188,12 +213,15 @@ async function shutdown(): Promise<void> {
   console.log("已停止。");
   process.exit(0);
 }
+// 进程里跑着所有人的机器人。意料之外的错误记下来，不让一处问题把大家都带下线
+process.on("uncaughtException", (error) => console.error("未捕获的错误：", error.message));
+process.on("unhandledRejection", (error) => console.error("未处理的错误：", error instanceof Error ? error.message : String(error)));
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 
 scan();
 if (webPort) {
-  startWeb({ env, port: webPort, stateOf: (name) => running.get(name)?.state() ?? "stopped" });
+  startWeb({ env, port: webPort, stateOf: (name) => running.get(name)?.state() ?? (broken.has(name) ? "failed" : "stopped") });
 }
 console.log("传声筒已启动");
 const scanner = setInterval(() => {

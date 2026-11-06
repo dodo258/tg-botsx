@@ -7,7 +7,7 @@ import { dayKey, formatTime, fullName, getContact, identityHtml, toContact } fro
 import { num, str } from "./db.ts";
 import { cardText, contactKeyboard, usesThreads } from "./desk.ts";
 import { backRow, CANCEL_KEYBOARD, deskModeLabel, renderMenu, renderPanel, setAwaiting } from "./menus.ts";
-import { clipHtml, escapeHtml, fitLines, kindLabel } from "./message-info.ts";
+import { clipChars, clipHtml, escapeHtml, fitLines, kindLabel } from "./message-info.ts";
 import { toMessage } from "./messages.ts";
 import { failureText, markUnreachable, recordOutbound, routeOf } from "./outbound.ts";
 import { fetchBot, syncCommands } from "./setup.ts";
@@ -34,19 +34,15 @@ export function parseCommand(text: string | undefined, botUsername: string): { n
 }
 
 export const HELP =
-  "<b>怎么回复</b>\n" +
-  "回复转来的那条消息，就是回复对方。对方看不到你的账号。\n" +
-  "话题模式下直接在话题里发。私聊模式也可以点卡片上的「选中」，之后直接发。\n" +
-  "发出去后你的消息上会出现 👌。以 // 开头的话留在这里，不会发给对方。\n\n" +
-  "其他操作发 /menu 打开面板，点按钮就行。下面的命令是给习惯打字的人用的。\n\n" +
-  "<b>联系人</b>\n" +
-  "/list 最近会话\n/search 关键词\n/history 聊天记录\n/note 备注内容\n/block /unblock 屏蔽和解除\n\n" +
-  "<b>消息</b>\n" +
-  "/del 回复自己发的消息，撤回它（48 小时内）\n/q 快捷回复列表，/q 名字 发送\n/qadd 名字 内容，/qdel 名字\n/filtered 隔离区\n\n" +
-  "<b>统计</b>\n/stats\n\n" +
-  "<b>只有主人能用</b>\n" +
-  "/settings 设置\n/rule 关键词自动回复\n/broadcast 回复一条消息后群发\n/bindgroup 在群里发，绑定话题群\n/status 运行状态\n/cleanup 清理记录\n/export 导出数据\n\n" +
-  "以上命令后面可以跟联系人数字 ID，比如 /history 123456；不跟就用当前话题、引用或选中的会话。";
+  "<b>❓ 怎么回复别人</b>\n\n" +
+  "<b>1. 长按回复</b>\n长按对方转来的消息，点「回复」，写完发送。再久以前的消息也可以。\n\n" +
+  "<b>2. 消息被顶上去了，找不到</b>\n点菜单打开面板 → 「最近会话」（有未读的排在前面），或者「搜索联系人」按名字、@用户名找。点名字，再点「✍️ 选中，直接回复」，之后直接打字就是发给他。首页最上面会一直显示正在回复谁。\n\n" +
+  "话题群模式下，直接在对方的话题里发。\n\n" +
+  "发出去后你的消息上会出现 👌，对方看不到你的账号。以 // 开头的话留在这里，不会发给对方。\n\n" +
+  "<b>习惯打字的话</b>\n" +
+  "/list 最近会话，/search 关键词，/history 聊天记录，/note 备注\n/block /unblock 屏蔽和解除，/del 回复自己的消息撤回\n/q 快捷回复，/qadd 名字 内容，/qdel 名字，/filtered 隔离区，/stats 统计\n" +
+  "只有主人能用：/settings /rule /broadcast /bindgroup /status /cleanup /export\n" +
+  "命令后面可以跟联系人数字 ID，比如 /history 123456。";
 
 const PAGE = 8;
 
@@ -75,7 +71,7 @@ async function targetContact(app: App, message: Message, staffId: number, arg: s
 }
 
 export async function renderSessions(app: App, offset: number): Promise<{ text: string; keyboard: unknown }> {
-  const rows = await app.db.prepare("SELECT * FROM contacts ORDER BY last_seen DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
+  const rows = await app.db.prepare("SELECT * FROM contacts ORDER BY unread > 0 DESC, last_seen DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
   const contacts = rows.slice(0, PAGE).map(toContact);
   if (contacts.length === 0) return { text: offset === 0 ? "还没有人联系过。把机器人链接发出去试试。" : "没有更多了。", keyboard: { inline_keyboard: [backRow()] } };
   const lines = contacts.map((contact) => {
@@ -83,13 +79,13 @@ export async function renderSessions(app: App, offset: number): Promise<{ text: 
     const blocked = contact.blockedAt === null ? "" : "已屏蔽 · ";
     return `${identityHtml(contact)}\n${blocked}${unread}${formatTime(contact.lastSeen, app.settings.timezone)}`;
   });
-  const buttons = contacts.map((contact) => [{ text: `${contact.unread > 0 ? `(${contact.unread}) ` : ""}${fullName(contact)}`.slice(0, 40), callback_data: `open:${contact.userId}` }]);
+  const buttons = contacts.map((contact) => [{ text: clipChars(`${contact.unread > 0 ? `(${contact.unread}) ` : ""}${fullName(contact)}`, 40), callback_data: `open:${contact.userId}` }]);
   const nav = [];
   if (offset > 0) nav.push({ text: "⬅️ 上一页", callback_data: `list:${Math.max(0, offset - PAGE)}` });
   if (rows.length > PAGE) nav.push({ text: "➡️ 下一页", callback_data: `list:${offset + PAGE}` });
   if (nav.length > 0) buttons.push(nav);
   buttons.push(backRow());
-  return { text: `<b>💬 最近会话</b>\n\n${lines.join("\n\n")}`, keyboard: { inline_keyboard: buttons } };
+  return { text: `<b>💬 最近会话</b>\n有未读的排在前面。点名字就能回复他。\n\n${lines.join("\n\n")}`, keyboard: { inline_keyboard: buttons } };
 }
 
 export async function renderHistory(app: App, userId: number, offset: number): Promise<{ text: string; keyboard: unknown }> {
@@ -119,7 +115,7 @@ export async function renderFiltered(app: App, offset: number): Promise<{ text: 
   const lines = shown.map((row, index) => `${index + 1}. <code>${row.userId}</code> · ${formatTime(row.createdAt, app.settings.timezone)} · ${clipHtml(row.reason ?? "", 120)}\n${clipHtml(row.text ?? `[${kindLabel(row.kind)}]`, 300)}`);
   const buttons = shown.map((row, index) => [
     { text: `✅ 放行 ${index + 1}`, callback_data: `release:${row.id}` },
-    { text: `🚫 屏蔽 ${index + 1}`, callback_data: `block:${row.userId}` },
+    { text: `🚫 屏蔽 ${index + 1}`, callback_data: `fblock:${row.userId}` },
   ]);
   if (rows.length > PAGE) buttons.push([{ text: "➡️ 下一页", callback_data: `filtered:${offset + PAGE}` }]);
   buttons.push(backRow());
@@ -139,7 +135,7 @@ export async function renderBlocked(app: App, offset: number): Promise<Page> {
   const rows = await app.db.prepare("SELECT * FROM contacts WHERE blocked_at IS NOT NULL ORDER BY blocked_at DESC LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
   const shown = rows.slice(0, PAGE).map(toContact);
   if (shown.length === 0) return { text: "没有屏蔽任何人。", keyboard: { inline_keyboard: [backRow()] } };
-  const buttons = shown.map((contact) => [{ text: `✅ 解除屏蔽：${fullName(contact)}`.slice(0, 40), callback_data: `ubl:${contact.userId}` }]);
+  const buttons = shown.map((contact) => [{ text: clipChars(`✅ 解除屏蔽：${fullName(contact)}`, 40), callback_data: `ubl:${contact.userId}` }]);
   const pager = pagerRow("bk", offset, rows.length > PAGE);
   return { text: `<b>🚫 已屏蔽</b>\n\n${shown.map(identityHtml).join("\n")}`, keyboard: { inline_keyboard: [...buttons, ...(pager.length ? [pager] : []), backRow()] } };
 }
@@ -147,7 +143,7 @@ export async function renderBlocked(app: App, offset: number): Promise<Page> {
 export async function renderQuick(app: App, offset: number): Promise<Page> {
   const rows = await app.db.prepare("SELECT rowid AS id, name, body FROM quick_replies ORDER BY name LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all<{ id: unknown; name: unknown; body: unknown }>();
   const shown = rows.slice(0, PAGE);
-  const buttons = shown.map((row) => [{ text: str(row.name).slice(0, 40), callback_data: `qv:${num(row.id)}` }]);
+  const buttons = shown.map((row) => [{ text: clipChars(str(row.name), 40), callback_data: `qv:${num(row.id)}` }]);
   const pager = pagerRow("qm", offset, rows.length > PAGE);
   const list = fitLines(shown.map((row) => `<b>${clipHtml(str(row.name), 60)}</b>：${clipHtml(str(row.body), 80)}`), "\n").text;
   return {
@@ -159,7 +155,7 @@ export async function renderQuick(app: App, offset: number): Promise<Page> {
 export async function renderRules(app: App, offset: number): Promise<Page> {
   const rows = await app.db.prepare("SELECT * FROM auto_rules ORDER BY id LIMIT ? OFFSET ?").bind(PAGE + 1, offset).all();
   const shown = rows.slice(0, PAGE);
-  const buttons = shown.map((row) => [{ text: str(row.keywords).slice(0, 40), callback_data: `rv:${num(row.id)}` }]);
+  const buttons = shown.map((row) => [{ text: clipChars(str(row.keywords), 40), callback_data: `rv:${num(row.id)}` }]);
   const pager = pagerRow("rl", offset, rows.length > PAGE);
   const list = fitLines(shown.map((row) => `${num(row.id)}. ${clipHtml(str(row.keywords), 80)} → ${clipHtml(str(row.reply), 60)}（命中 ${num(row.hits)}）`), "\n", 3500).text;
   return {
@@ -213,19 +209,23 @@ export async function statusText(app: App): Promise<string> {
 
 /** 把快捷回复发给联系人，并在客服台留一份。失败时返回给管理员看的原因。 */
 export async function deliverQuick(app: App, contact: Contact, body: string, chatId: number, threadId: number | undefined, staffId: number): Promise<string | null> {
+  let sent: { message_id: number };
   try {
-    const sent = await app.tg.call<{ message_id: number }>("sendMessage", { chat_id: contact.userId, text: body });
-    const shown = await app.tg.call<{ message_id: number }>("sendMessage", {
-      chat_id: chatId,
-      ...(threadId === undefined ? {} : { message_thread_id: threadId }),
-      text: body,
-    });
-    await recordOutbound(app, contact, { kind: "text", text: body, fileId: "", userMsgId: sent.message_id, deskChatId: chatId, deskMsgId: shown.message_id, staffId });
-    return null;
+    sent = await app.tg.call<{ message_id: number }>("sendMessage", { chat_id: contact.userId, text: body });
   } catch (error) {
     if (error instanceof TelegramError && error.userUnreachable) await markUnreachable(app, contact);
     return failureText(contact, error);
   }
+  // 对方已经收到了。留底失败不能说「没发出去」，否则管理员会再发一遍
+  let shownId = 0;
+  try {
+    const shown = await app.tg.call<{ message_id: number }>("sendMessage", { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), text: body });
+    shownId = shown.message_id;
+  } catch (error) {
+    app.log("warn", "快捷回复留底失败", error instanceof Error ? error.message : String(error));
+  }
+  await recordOutbound(app, contact, { kind: "text", text: body, fileId: "", userMsgId: sent.message_id, deskChatId: chatId, deskMsgId: shownId, staffId });
+  return null;
 }
 
 async function cmdQuick(app: App, message: Message, staffId: number, args: string): Promise<void> {
@@ -279,8 +279,9 @@ async function cmdBroadcast(app: App, message: Message, args: string): Promise<v
     return;
   }
   const source = message.reply_to_message;
-  if (!source) {
-    await say(app, message, "先写好要群发的内容，然后回复那条消息发 /broadcast。");
+  // 话题里不引用也带 reply_to_message，指向话题创建消息，不能当群发内容
+  if (!source || Object.hasOwn(source, "forum_topic_created")) {
+    await say(app, message, "先写好要群发的内容，然后回复那条消息发 /broadcast。也可以在面板里点「群发」。");
     return;
   }
   await offerBroadcast(app, message, source.message_id);
@@ -366,9 +367,11 @@ export async function cmdBindGroup(app: App, message: Message): Promise<void> {
     await say(app, message, "机器人缺「管理话题」权限。到管理员设置里打开，再发一次 /bindgroup。");
     return;
   }
+  // 重新绑定同一个群时话题还在，不清对应关系，否则老话题里发的话找不到人
+  const sameGroup = app.settings.deskMode === "group" && app.settings.groupId === message.chat.id;
   await saveSetting(app.db, app.settings, "groupId", message.chat.id);
   await saveSetting(app.db, app.settings, "deskMode", "group");
-  await app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
+  if (!sameGroup) await app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
   await syncCommands(app);
   await say(app, message, "绑定成功。之后每个联系人会有自己的话题，群里的人都能在话题里回复。\n以 // 开头的话只留在群里，不会发给对方。");
 }
@@ -402,7 +405,7 @@ export async function handleCommand(app: App, message: Message, staffId: number,
         await cmdBindGroup(app, message);
         return true;
       }
-      const panel = await renderPanel(app, owner);
+      const panel = await renderPanel(app, owner, staffId);
       await say(app, message, panel.text, panel.keyboard);
       return true;
     }
@@ -446,7 +449,7 @@ export async function handleCommand(app: App, message: Message, staffId: number,
         return true;
       }
       if (!body) {
-        await setAwaiting(app, staffId, `note:${contact.userId}`);
+        await setAwaiting(app, staffId, `note:${contact.userId}`, { chatId: message.chat.id, threadId: message.message_thread_id });
         await say(app, message, `给 ${identityHtml(contact)} 写备注，发 0 清空。\n现在的备注：${escapeHtml(contact.note) || "无"}`, CANCEL_KEYBOARD);
         return true;
       }

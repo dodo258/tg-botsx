@@ -20,6 +20,7 @@ BRANCH="${TGBOTSX_BRANCH:-main}"
 DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
 MANAGE="tgbot"
 MORE_TOKENS=""
+NO_TOKEN=""
 WEB_CHOICE="${WEB_MODE:-}"
 # 从 tgbot update 调用时可能继承 umask 077，程序文件必须让容器里的 node 用户读得到
 umask 022
@@ -117,13 +118,28 @@ configure_token() {
   while :; do
     if [ -z "$token" ]; then
       say "还没有机器人的话：在 Telegram 打开 @BotFather，发 /newbot，按提示取名，它会给你一串 Token。"
-      say "粘贴 Bot Token（输入时不显示），可以一次粘贴多个，一行一个，粘贴完再按一次回车："
+      if [ "$WEB_CHOICE" = "domain" ] || [ "$WEB_CHOICE" = "port" ]; then
+        say "粘贴 Bot Token（输入时不显示），可以一次粘贴多个，一行一个。也可以直接回车跳过，部署好到网页上添加："
+      else
+        say "粘贴 Bot Token（输入时不显示），可以一次粘贴多个，一行一个，粘贴完再按一次回车："
+      fi
       local line
+      local received=0
       while IFS= read -r -s line < /dev/tty; do
         [ -n "$line" ] || break
+        received=$((received + 1))
+        say "已收到第 $received 个。继续粘贴下一个，或者直接回车结束。"
         if [ -z "$token" ]; then token="$line"; else MORE_TOKENS="$MORE_TOKENS $line"; fi
       done
-      [ -n "$token" ] || die "读不到输入。可以用 BOT_TOKEN=xxx 环境变量运行。"
+      if [ -z "$token" ]; then
+        # 开了网页就可以部署好再去网页上加
+        if [ "$WEB_CHOICE" = "domain" ] || [ "$WEB_CHOICE" = "port" ]; then
+          say "先不加机器人，部署好到网页上添加。"
+          NO_TOKEN=1
+          return 0
+        fi
+        die "读不到输入。可以用 BOT_TOKEN=xxx 环境变量运行。"
+      fi
     fi
     reply="$(call_get_me "$token" || true)"
     case "$reply" in
@@ -136,9 +152,11 @@ configure_token() {
         say "Telegram 说这个 Token 不对。去 @BotFather 发 /token 核对。"
         ;;
       *)
-        say "连不上 Telegram（$API_BASE）。国内服务器通常连不上，要用代理或反代，见 .env.example。"
-        if [ -f "$env_file" ] && grep -q '^HTTPS_PROXY=' "$env_file"; then
-          say "检测到 .env 里配了代理，跳过这一步校验。"
+        say "连不上 Telegram（$API_BASE）。国内服务器通常连不上，要在 $env_file 里配代理或反代。"
+        say "写法：HTTPS_PROXY=http://host.docker.internal:7890 和 NODE_USE_ENV_PROXY=1 两行，或者 TELEGRAM_API_BASE=https://你的反代域名。"
+        # .env 里已有的 Token 只是这会儿校验不了，不用让人重新粘贴（比如更新时网络抖动）
+        if [ -f "$env_file" ] && { grep -q '^HTTPS_PROXY=' "$env_file" || grep -qxF "BOT_TOKEN=$token" "$env_file"; }; then
+          say "先跳过这一步校验，用 .env 里已有的配置继续。"
           BOT_NAME=""
           break
         fi
@@ -184,22 +202,27 @@ choose_web() {
     return
   fi
   step "网页管理（可选）"
-  say "只跑一个机器人的话不需要它，不开任何端口。要给多个人开机器人，用网页会方便很多。"
-  say "  1) 不要（默认）"
-  say "  2) 要，用我自己的域名（自动申请 Let's Encrypt 证书并续期，需要 80 和 443 端口空闲）"
-  say "  3) 要，我没有域名（用自签名证书，第一次打开浏览器会提示不安全）"
+  say "在浏览器里添加机器人、指定管理员。要给多个人开机器人，用它会方便很多；只跑一个机器人可以不要。"
+  say "  1) 要，用我自己的域名（推荐：自动申请 Let's Encrypt 免费证书，到期自动续）"
+  say "  2) 要，但我没有域名（用自签名证书，第一次打开浏览器会提示不安全）"
+  say "  3) 不要（只跑一个机器人，服务器不开任何端口）"
   local answer
-  read -r -p "选择 [1]: " answer < /dev/tty || answer=1
-  case "$answer" in
-    2)
-      WEB_CHOICE=domain
-      while [ -z "${WEB_DOMAIN:-}" ]; do
-        read -r -p "域名（先解析到这台服务器，比如 bot.example.com）: " WEB_DOMAIN < /dev/tty || die "读不到输入。"
-      done
-      ;;
-    3) WEB_CHOICE=port ;;
-    *) WEB_CHOICE=off ;;
-  esac
+  while :; do
+    read -r -p "选择 [1]: " answer < /dev/tty || answer=3
+    case "${answer:-1}" in
+      1)
+        say "先把域名解析到这台服务器，并在云服务商的防火墙放行 80 和 443 端口。直接回车可以回去重选。"
+        read -r -p "域名（比如 bot.example.com）: " WEB_DOMAIN < /dev/tty || WEB_DOMAIN=""
+        if [ -n "$WEB_DOMAIN" ]; then
+          WEB_CHOICE=domain
+          return
+        fi
+        ;;
+      2) WEB_CHOICE=port; return ;;
+      3) WEB_CHOICE=off; return ;;
+      *) say "请输入 1、2 或 3。" ;;
+    esac
+  done
 }
 
 apply_web() {
@@ -222,9 +245,24 @@ add_more_bots() {
 
 start_bot() {
   step "启动机器人"
+  # 没有机器人时程序靠网页才有事可做，基础配置下会直接退出，所以先把网页配置带上
+  if [ -n "$NO_TOKEN" ] && ! grep -q '^COMPOSE_FILE=.*web' "$DIR/.env" 2>/dev/null; then
+    (
+      umask 077
+      touch "$DIR/.env"
+      grep -q '^WEB_PORT=' "$DIR/.env" || printf 'WEB_PORT=%s\n' "${WEB_PORT:-$(( ( $(od -An -N2 -tu2 /dev/urandom) % 40000 ) + 20000 ))}" >> "$DIR/.env"
+      grep -v '^COMPOSE_FILE=' "$DIR/.env" > "$DIR/.env.tmp" || true
+      printf 'COMPOSE_FILE=docker-compose.yml:docker-compose.web.yml\n' >> "$DIR/.env.tmp"
+      cat "$DIR/.env.tmp" > "$DIR/.env"
+      rm -f "$DIR/.env.tmp"
+      chmod 600 "$DIR/.env"
+    )
+  fi
   (cd "$DIR" && docker compose up -d --build --remove-orphans) || die "启动失败，请看上面的报错。"
   local waited=0
-  until (cd "$DIR" && docker compose logs bot 2>/dev/null | grep -q '已连接'); do
+  local ready='已连接'
+  [ -z "$NO_TOKEN" ] || ready='传声筒已启动'
+  until (cd "$DIR" && docker compose logs bot 2>/dev/null | grep -q "$ready"); do
     sleep 1
     waited=$((waited + 1))
     if [ "$waited" -ge 60 ]; then
@@ -232,17 +270,36 @@ start_bot() {
       die "机器人 60 秒内没有连上 Telegram，日志在上面。"
     fi
   done
-  say "机器人已连上 Telegram。"
+  if [ -n "$NO_TOKEN" ]; then say "程序已启动。"; else say "机器人已连上 Telegram。"; fi
 }
 
 show_claim() {
+  [ -z "$NO_TOKEN" ] || return 0
   step "最后一步：绑定管理员"
-  local logs link
-  logs="$(cd "$DIR" && docker compose logs bot 2>/dev/null)"
-  link="$(printf '%s\n' "$logs" | grep -o 'https://t.me/[^ ]*start=claim_[A-Za-z0-9_-]*' | tail -n 1 || true)"
+  local logs="" link="" state="" waited=0
+  # 开网页时容器刚重建，要等它连上才查得到。不能把「还没连上」当成「已经绑定过」
+  while [ "$waited" -lt 30 ]; do
+    state="$( (cd "$DIR" && docker compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts list </dev/null 2>/dev/null) | grep '^默认' | cut -f3 || true)"
+    case "$state" in
+      已绑定*)
+        say "已经绑定过管理员了。要换人的话运行：$MANAGE claim"
+        return 0
+        ;;
+      绑定已过期*)
+        say "绑定已过期。运行 $MANAGE claim 重新生成。"
+        return 0
+        ;;
+      *) ;;
+    esac
+    logs="$(cd "$DIR" && docker compose logs bot 2>/dev/null)"
+    link="$(printf '%s\n' "$logs" | grep -o 'https://t.me/[^ ]*start=claim_[A-Za-z0-9_-]*' | tail -n 1 || true)"
+    [ -z "$link" ] || break
+    sleep 1
+    waited=$((waited + 1))
+  done
   if [ -z "$link" ]; then
-    say "已经绑定过管理员了。要换人的话运行：$MANAGE claim"
-    return
+    say "还没拿到绑定方式。稍后运行 $MANAGE claim 生成。"
+    return 0
   fi
   local username pair
   pair="$(printf '%s\n' "$logs" | grep -o '配对图案：.*' | tail -n 1 | sed 's/^配对图案：//' | tr -d '[:cntrl:]' || true)"

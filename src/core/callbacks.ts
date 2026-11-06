@@ -76,10 +76,11 @@ async function passVerification(ctx: Ctx, contact: Contact): Promise<void> {
     .bind(app.now(), contact.userId)
     .run();
   contact.verifiedAt = app.now();
-  await ctx.answer("验证通过");
+  // 先转消息，再改提示：提示失败不能让暂存的消息卡住
   const held = await app.db.prepare("SELECT COUNT(*) AS n FROM held_messages WHERE user_id = ?").bind(contact.userId).first<{ n: unknown }>();
-  await edit(ctx, num(held?.n) > 0 ? "验证通过，刚才的消息已经转过去了。" : "验证通过，现在可以直接发消息了。");
   await releaseHeld(app, contact);
+  await ctx.answer("验证通过");
+  await edit(ctx, num(held?.n) > 0 ? "验证通过，刚才的消息已经转过去了。" : "验证通过，现在可以直接发消息了。");
 }
 
 // ---------- 隔离区 ----------
@@ -100,7 +101,10 @@ async function refreshCard(ctx: Ctx, userId: number): Promise<void> {
   if (!contact) return;
   const selected = (await selectedUser(ctx.app, ctx.query.from.id)) === userId;
   try {
-    await ctx.app.tg.call("editMessageReplyMarkup", { chat_id: ctx.chatId, message_id: ctx.messageId, reply_markup: contactKeyboard(contact, selected, usesThreads(ctx.app)) });
+    // 详情页底部的「返回列表」和话题链接不是卡片按钮，要留着，否则页面就成了死路
+    const extra = (ctx.query.message?.reply_markup?.inline_keyboard ?? []).filter((row) => row.some((button) => "url" in button || ("callback_data" in button && button.callback_data?.startsWith("list:"))));
+    const card = contactKeyboard(contact, selected, usesThreads(ctx.app));
+    await ctx.app.tg.call("editMessageReplyMarkup", { chat_id: ctx.chatId, message_id: ctx.messageId, reply_markup: { inline_keyboard: [...card.inline_keyboard, ...extra] } });
   } catch (error) {
     if (error instanceof TelegramError && error.notModified) return;
     throw error;
@@ -131,8 +135,13 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
     case "mi": {
       const spec = INPUTS[arg];
       if (!spec) return false;
-      await setAwaiting(app, ctx.query.from.id, arg);
-      await app.tg.call("sendMessage", { chat_id: ctx.chatId, text: spec.prompt, reply_markup: CANCEL_KEYBOARD });
+      await setAwaiting(app, ctx.query.from.id, arg, { chatId: ctx.chatId, threadId: ctx.query.message?.message_thread_id });
+      await app.tg.call("sendMessage", {
+        chat_id: ctx.chatId,
+        ...(ctx.query.message?.message_thread_id === undefined ? {} : { message_thread_id: ctx.query.message.message_thread_id }),
+        text: spec.prompt,
+        reply_markup: CANCEL_KEYBOARD,
+      });
       return true;
     }
     case "mc":
@@ -147,10 +156,13 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
           await ctx.answer("机器人还没开话题模式。到 @BotFather 的 Mini App 打开后再试。", true);
           return true;
         }
-        await saveSetting(app.db, app.settings, "deskMode", extra);
-        await saveSetting(app.db, app.settings, "groupId", null);
-        await app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
-        await syncCommands(app);
+        // 点了已经生效的选项：什么都不用动，清了对应关系老话题就找不到人了
+        if (app.settings.deskMode !== extra) {
+          await saveSetting(app.db, app.settings, "deskMode", extra);
+          await saveSetting(app.db, app.settings, "groupId", null);
+          await app.db.prepare("UPDATE contacts SET thread_id = NULL, thread_claim_at = NULL").run();
+          await syncCommands(app);
+        }
         const menu = renderMenu(app, "desk");
         await edit(ctx, menu.text, menu.keyboard);
         return true;
@@ -231,17 +243,31 @@ async function staffAction(ctx: Ctx, action: string, arg: string, extra: string 
     case "select":
       await setSelected(app, query.from.id, userId);
       await app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(userId).run();
-      await ctx.answer("已选中，接下来发的消息都给这个人。");
-      return await refreshCard(ctx, userId);
+      await ctx.answer("已选中");
+      await refreshCard(ctx, userId);
+      // 卡片很快会被顶上去，留一条看得见的提示，防止发错人
+      await app.tg.call("sendMessage", {
+        chat_id: ctx.chatId,
+        parse_mode: "HTML",
+        text: `✍️ 现在发的消息都给 ${identityHtml(contact)}。\n想回别人，从最近会话里换一个。`,
+        reply_markup: { inline_keyboard: [[{ text: "📜 聊天记录", callback_data: `history:${userId}:0` }, { text: "⚡️ 快捷回复", callback_data: `qp:${userId}` }], [{ text: "⬜️ 取消选中", callback_data: `unsel:${userId}` }, { text: "💬 最近会话", callback_data: "list:0" }]] },
+      });
+      return;
     case "unselect":
-      await setSelected(app, query.from.id, null);
+      // 卡片可能是旧的：只有确实选中了这个人才取消，不能把正在回复的别人也清了
+      if ((await selectedUser(app, query.from.id)) === userId) await setSelected(app, query.from.id, null);
       await ctx.answer("已取消选中。");
       return await refreshCard(ctx, userId);
     case "open":
       await app.db.prepare("UPDATE contacts SET unread = 0 WHERE user_id = ?").bind(userId).run();
       contact.unread = 0;
       return await edit(ctx, cardText(app, contact), {
-        inline_keyboard: [...contactKeyboard(contact, (await selectedUser(app, query.from.id)) === userId, usesThreads(app)).inline_keyboard, [{ text: "⬅️ 返回列表", callback_data: "list:0" }]],
+        inline_keyboard: [
+          // 话题群模式没有「选中」，回复要去他的话题里。话题链接的群号是去掉 -100 的部分
+          ...(app.settings.deskMode === "group" && contact.threadId !== null && app.settings.groupId !== null ? [[{ text: "💬 打开他的话题", url: `https://t.me/c/${String(app.settings.groupId).replace(/^-100/, "")}/${contact.threadId}` }]] : []),
+          ...contactKeyboard(contact, (await selectedUser(app, query.from.id)) === userId, usesThreads(app)).inline_keyboard,
+          [{ text: "⬅️ 返回列表", callback_data: "list:0" }],
+        ],
       });
     case "history": {
       const page = await renderHistory(app, userId, positiveInt(extra) ?? 0);
@@ -256,7 +282,7 @@ async function staffAction(ctx: Ctx, action: string, arg: string, extra: string 
       return;
     }
     case "note":
-      await setAwaiting(app, query.from.id, `note:${userId}`);
+      await setAwaiting(app, query.from.id, `note:${userId}`, { chatId: ctx.chatId, threadId: query.message?.message_thread_id });
       await app.tg.call("sendMessage", {
         chat_id: ctx.chatId,
         ...(query.message?.message_thread_id === undefined ? {} : { message_thread_id: query.message.message_thread_id }),
@@ -297,7 +323,10 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
   const answer = async (text?: string, alert = false) => {
     if (answered) return;
     answered = true;
-    await app.tg.call("answerCallbackQuery", { callback_query_id: query.id, ...(text === undefined ? {} : { text, show_alert: alert }) });
+    // 点击太久才处理时 Telegram 会拒绝这个调用。只是个提示，不能打断后面真正要做的事
+    await app.tg.call("answerCallbackQuery", { callback_query_id: query.id, ...(text === undefined ? {} : { text, show_alert: alert }) }).catch((error: unknown) => {
+      app.log("warn", "回应按钮失败", error instanceof Error ? error.message : String(error));
+    });
   };
   if (!message) return await answer("这条消息太旧了，操作不了。", true);
   const ctx: Ctx = { app, query, chatId: message.chat.id, messageId: message.message_id, answer };
@@ -331,15 +360,23 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
   const fromGroup = app.settings.deskMode === "group" && message.chat.id === app.settings.groupId;
   if (!fromOwnerDm && !fromGroup) return await answer();
   // 点了别的按钮就是不想继续输入了，否则接下来发的话会被当成输入，发不到客户那里
-  await clearAwaiting(app, query.from.id);
-  if (PANEL_ACTIONS.has(action)) {
-    if (PANEL_OWNER_ACTIONS.has(action) && !isOwner(app, query.from.id)) return await answer("只有主人能操作。", true);
-    await panelAction(ctx, action, arg, extra);
-  } else if (OWNER_ACTIONS.has(action)) {
-    if (!isOwner(app, query.from.id)) return await answer("只有主人能操作。", true);
-    if (!(await ownerAction(ctx, action, arg, extra))) app.log("warn", "收到无法识别的主人操作", action);
-  } else {
-    await staffAction(ctx, action, arg, extra);
+  await clearAwaiting(app, query.from.id, message.chat.id);
+  try {
+    if (PANEL_ACTIONS.has(action)) {
+      if (PANEL_OWNER_ACTIONS.has(action) && !isOwner(app, query.from.id)) return await answer("只有主人能操作。", true);
+      await panelAction(ctx, action, arg, extra);
+    } else if (OWNER_ACTIONS.has(action)) {
+      if (!isOwner(app, query.from.id)) return await answer("只有主人能操作。", true);
+      if (!(await ownerAction(ctx, action, arg, extra))) app.log("warn", "收到无法识别的主人操作", action);
+    } else {
+      await staffAction(ctx, action, arg, extra);
+    }
+  } catch (error) {
+    // 按钮点了没反应最让人困惑：出错要当场说
+    app.log("error", `按钮操作 ${action} 失败`, error instanceof Error ? error.message : String(error));
+    const blocked = error instanceof TelegramError && error.userUnreachable;
+    await answer(blocked ? "对方已经拉黑了机器人，这一步做不了。" : "这一步没成功，可能是网络问题，请再点一次。", true);
+    return;
   }
   await answer();
 }

@@ -1,13 +1,13 @@
 // 网页管理：加机器人、看谁在用、重新指定管理员。不碰聊天内容。
 // 所有写操作都要登录；Cookie 只走 HTTPS、不给脚本读、不跨站发送；再校验一次 Origin。
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:https";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { freemem as osFree, totalmem } from "node:os";
 import { join } from "node:path";
 import { saveSetting, loadSettings } from "../core/settings.ts";
-import { addBot, allNames, dbPath, DEFAULT_NAME, describeBot, removeBot, reopenClaim, replaceToken, resetOwner } from "./fleet.ts";
+import { addBot, allNames, assignOwner, dbPath, DEFAULT_NAME, describeBot, removeBot, replaceToken } from "./fleet.ts";
 import type { BotInfo, FleetEnv } from "./fleet.ts";
 import { sqliteDb } from "./sqlite-adapter.ts";
 import { loadOrCreateCert } from "./tls.ts";
@@ -48,11 +48,22 @@ function readAuth(env: FleetEnv): Auth | null {
   return typeof user === "string" && typeof salt === "string" && typeof hash === "string" ? { user, salt, hash } : null;
 }
 
-function verify(auth: Auth, user: string, password: string): boolean {
-  const expected = Buffer.from(auth.hash, "hex");
-  const actual = Buffer.from(hashPassword(password, auth.salt), "hex");
-  // 账号不对也算一遍哈希，不让人从响应时间猜账号
-  return timingSafeEqual(expected, actual) && user === auth.user;
+// 一次只算一个：scrypt 很吃 CPU，一起算会把同进程的机器人都卡住
+let hashQueue: Promise<unknown> = Promise.resolve();
+
+function verify(auth: Auth, user: string, password: string): Promise<boolean> {
+  const job = hashQueue.then(
+    () =>
+      new Promise<boolean>((resolve, reject) => {
+        scrypt(password, auth.salt, 32, (error, actual) => {
+          if (error) return reject(error);
+          // 账号不对也算一遍哈希，不让人从响应时间猜账号
+          resolve(timingSafeEqual(Buffer.from(auth.hash, "hex"), actual) && user === auth.user);
+        });
+      }),
+  );
+  hashQueue = job.catch(() => undefined);
+  return job;
 }
 
 class HttpError extends Error {
@@ -99,8 +110,25 @@ export function startWeb(options: WebOptions): Server {
   // 只在明确配置时才信代理传来的 IP：直连端口的人可以随便伪造这个请求头
   const ipHeader = process.env.WEB_IP_HEADER?.toLowerCase();
   const clientIp = (req: IncomingMessage) => (ipHeader ? text(req.headers[ipHeader]).split(",")[0]?.trim() : "") || req.socket.remoteAddress || "";
-  // 总量限制：伪造 IP 也绕不过。比单个 IP 宽，正常情况碰不到
-  let globalFailures = { count: 0, windowEnds: 0 };
+  // 总量限制：伪造 IP 也绕不过。超过后不是一律拒绝，而是放慢：攻击者猜不动，主人多试几次还能进
+  let globalFailures = { count: 0, windowEnds: 0, lastTry: 0 };
+
+  // 密码在别的进程里改过（tgbot web-password）：旧登录全部作废，锁定也解开
+  let authHash = readAuth(env)?.hash ?? "";
+  const syncAuth = () => {
+    const current = readAuth(env)?.hash ?? "";
+    if (current === authHash) return;
+    authHash = current;
+    sessions.clear();
+    failures.clear();
+    globalFailures = { count: 0, windowEnds: 0, lastTry: 0 };
+  };
+  const loginBlock = (ip: string): string | null => {
+    const record = failures.get(ip);
+    if (record && record.until > now()) return "试错太多次了，15 分钟后再试。";
+    if (globalFailures.windowEnds > now() && globalFailures.count >= 50 && now() - globalFailures.lastTry < 5) return "最近登录失败太多，请过几秒再试。";
+    return null;
+  };
 
   const sessionOf = (req: IncomingMessage): string | null => {
     const match = new RegExp(`(?:^|; )${COOKIE}=([a-f0-9]{64})`).exec(req.headers.cookie ?? "");
@@ -114,7 +142,8 @@ export function startWeb(options: WebOptions): Server {
     return id;
   };
 
-  const botView = (info: BotInfo) => ({ ...info, link: undefined, state: options.stateOf(info.name), canDelete: info.name !== DEFAULT_NAME, chatLink: info.username ? `https://t.me/${info.username}` : "" });
+  // 链接等于交出管理权，只有「只能用链接绑定」时才给网页显示
+  const botView = (info: BotInfo) => ({ ...info, link: info.claimMode === "link" && info.claimOpen ? info.link : undefined, state: options.stateOf(info.name), canDelete: info.name !== DEFAULT_NAME, chatLink: info.username ? `https://t.me/${info.username}` : "" });
 
   const requireBot = (name: string) => {
     if (!allNames(env).includes(name)) throw new HttpError(404, "没有这个机器人。");
@@ -133,22 +162,25 @@ export function startWeb(options: WebOptions): Server {
 
   async function api(req: IncomingMessage, res: ServerResponse, path: string): Promise<unknown> {
     const method = req.method ?? "GET";
+    syncAuth();
     if (path === "/api/login" && method === "POST") {
       const ip = clientIp(req);
-      const record = failures.get(ip);
-      if (record && record.until > now()) throw new HttpError(429, "试错太多次了，15 分钟后再试。");
-      if (globalFailures.windowEnds > now() && globalFailures.count >= 50) throw new HttpError(429, "最近登录失败太多，15 分钟后再试。");
+      const early = loginBlock(ip);
+      if (early) throw new HttpError(429, early);
       const body = await readJson(req);
       const auth = readAuth(env);
       if (!auth) throw new HttpError(503, "还没有设置账号，在服务器上运行 tgbot web-password。");
-      if (!verify(auth, text(body.user), text(body.password))) {
-        const count = (record?.count ?? 0) + 1;
-        failures.set(ip, { count, until: count >= 5 ? now() + 900 : 0 });
-        if (globalFailures.windowEnds <= now()) globalFailures = { count: 0, windowEnds: now() + 900 };
-        globalFailures.count++;
-        throw new HttpError(401, "账号或密码不对。");
-      }
+      // 读完请求体再查一次，并先记上这次尝试：同时发一大批也只有前几个能进来算密码
+      const blocked = loginBlock(ip);
+      if (blocked) throw new HttpError(429, blocked);
+      const count = (failures.get(ip)?.count ?? 0) + 1;
+      failures.set(ip, { count, until: count >= 5 ? now() + 900 : 0 });
+      if (globalFailures.windowEnds <= now()) globalFailures = { count: 0, windowEnds: now() + 900, lastTry: 0 };
+      globalFailures.count++;
+      globalFailures.lastTry = now();
+      if (!(await verify(auth, text(body.user), text(body.password)))) throw new HttpError(401, "账号或密码不对。");
       failures.delete(ip);
+      globalFailures.count = Math.max(0, globalFailures.count - 1);
       const id = randomBytes(32).toString("hex");
       sessions.set(id, now() + SESSION_TTL_SECONDS);
       res.setHeader("set-cookie", `${COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_TTL_SECONDS}`);
@@ -164,8 +196,9 @@ export function startWeb(options: WebOptions): Server {
     if (path === "/api/password" && method === "POST") {
       const body = await readJson(req);
       const auth = readAuth(env);
-      if (!auth || !verify(auth, auth.user, text(body.current))) throw new HttpError(400, "当前密码不对。");
+      if (!auth || !(await verify(auth, auth.user, text(body.current)))) throw new HttpError(400, "当前密码不对。");
       setAuth(env, text(body.user) || auth.user, text(body.password));
+      authHash = readAuth(env)?.hash ?? "";
       // 其他设备的登录作废，只留当前这个
       for (const id of sessions.keys()) if (id !== session) sessions.delete(id);
       return { ok: true };
@@ -201,12 +234,7 @@ export function startWeb(options: WebOptions): Server {
     }
     if (action === "assign" && method === "POST") {
       const body = await readJson(req);
-      const info = await describeBot(env, name);
-      // 用户名校验失败时不能先把现有管理员清掉，所以校验放在 fleet 里的共用入口之前
-      const user = text(body.user).trim().replace(/^@/, "");
-      if (user && !/^[A-Za-z0-9_]{3,32}$/.test(user)) throw new HttpError(400, "用户名只能有英文字母、数字和下划线，比如 @zhangsan。");
-      const updated = info.bound ? await resetOwner(env, name, { claimUser: user }) : await reopenClaim(env, name, { claimUser: user });
-      return botView(updated);
+      return botView(await assignOwner(env, name, text(body.user)));
     }
     if (action === "token" && method === "POST") {
       const body = await readJson(req);
@@ -237,6 +265,11 @@ export function startWeb(options: WebOptions): Server {
 
   const { key, cert } = loadOrCreateCert(join(env.dataDir, "web"));
   const server = createServer({ key, cert }, (req, res) => {
+    // 这里抛错没人接，整个进程连同所有机器人都会退出，所以怪输入一律当坏请求
+    if (!URL.canParse(req.url ?? "/", "https://local")) {
+      res.writeHead(400).end();
+      return;
+    }
     const url = new URL(req.url ?? "/", "https://local");
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("x-frame-options", "DENY");
@@ -257,7 +290,7 @@ export function startWeb(options: WebOptions): Server {
     res.setHeader("cache-control", "no-store");
     // 写操作校验来源，挡跨站请求。Cookie 已经 SameSite=Strict，这是第二道
     const origin = req.headers.origin;
-    if (req.method !== "GET" && origin !== undefined && new URL(origin).host !== req.headers.host) {
+    if (req.method !== "GET" && origin !== undefined && (!URL.canParse(origin) || new URL(origin).host !== req.headers.host)) {
       res.writeHead(403).end(JSON.stringify({ error: "来源不对。" }));
       return;
     }

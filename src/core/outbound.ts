@@ -51,7 +51,7 @@ export async function routeOf(app: App, message: Message, staffId: number): Prom
   return contact ? { contact, stored: null } : null;
 }
 
-async function reactOk(app: App, message: Message, emoji: string): Promise<void> {
+export async function reactOk(app: App, message: Message, emoji: string): Promise<void> {
   try {
     await app.tg.call("setMessageReaction", { chat_id: message.chat.id, message_id: message.message_id, reaction: [{ type: "emoji", emoji }] });
   } catch (error) {
@@ -106,7 +106,12 @@ export async function handleStaffMessage(app: App, message: Message, staffId: nu
   if (!route) {
     // 话题群的 General 里闲聊不提示，也不转发
     if (app.settings.deskMode === "group") return;
-    await say(app, message, message.reply_to_message ? "认不出这条引用是谁的消息，这条没发出去。\n点 /list 选一个会话。" : "现在没选中会话，这条没发出去。\n回复某条消息，或点卡片上的「选中」。");
+    await app.tg.call("sendMessage", {
+      chat_id: message.chat.id,
+      ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
+      text: message.reply_to_message ? "认不出这条引用是谁的消息，这条没发出去。" : "还没选要回复谁，这条没发出去。\n长按对方转来的消息点「回复」，或者从最近会话里选一个人。",
+      reply_markup: { inline_keyboard: [[{ text: "💬 最近会话", callback_data: "list:0" }, { text: "🔍 搜索联系人", callback_data: "srch" }]] },
+    });
     return;
   }
   const { contact, stored } = route;

@@ -41,11 +41,14 @@ export interface Settings {
   claimExpiresAt: number;
   /** 首次绑定的配对图案，只显示在服务器终端。空字符串表示按钮已失效 */
   claimPair: string;
-  /** pair：点配对图案；open：谁先点算谁；user：只让 claimUser 这个用户名点 */
-  claimMode: "pair" | "open" | "user";
+  /** pair：点配对图案；open：谁先点算谁；user：claimUser 这个用户名私聊就绑定；link：只有链接能绑定 */
+  claimMode: "pair" | "open" | "user" | "link";
   claimUser: string;
+  /** 这次认领给人点的图案。创建时定好不再变，否则多看几次取交集就能算出答案 */
+  claimChoices: string;
   /** 管理员的名字，给部署的人看是谁绑定的 */
   ownerName: string;
+  ownerUsername: string;
   /** 私聊模式下上一张会话卡片属于谁，换人时要重新发卡片 */
   lastCardUser: number;
   lastMaintenanceDay: string;
@@ -82,7 +85,9 @@ export const DEFAULT_SETTINGS: Settings = {
   claimPair: "",
   claimMode: "pair",
   claimUser: "",
+  claimChoices: "",
   ownerName: "",
+  ownerUsername: "",
   lastCardUser: 0,
   lastMaintenanceDay: "",
 };
