@@ -211,7 +211,7 @@ cmd_uninstall() {
   if [ "$answer" = "删除数据" ]; then
     backup_if_possible
     compose down -v
-    printf '数据已删除，最后一份备份在 %s/backups（确认不需要后自己删）。\n' "$DIR"
+    printf '数据已删除。最后一份备份在 %s/backups，Token 还在 %s/.env，确认不需要后自己删掉这个目录。\n' "$DIR" "$DIR"
     remove_command_if_last
     rm -rf "$DIR/src" "$DIR/package.json" "$DIR/Dockerfile" "$DIR/.dockerignore" "$DIR/.env.example" "$DIR/docker-compose.yml"
   else

@@ -50,7 +50,7 @@ tgbot update-all      更新所有机器人
 
 新机器人的文件在 `/opt/tg-botsx-shop`。这里的隔离是机器人之间的：有服务器 root 权限的人能读到所有机器人的 Token 和聊天记录。替别人开之前请告诉对方；不想让你看到的人，应该部署到自己的服务器。
 
-不想用 Docker：需要 Node.js 22.18+，把仓库放到 `/opt/tg-botsx`，写好 `.env`，用 [deploy/tg-botsx.service](deploy/tg-botsx.service) 启动。运行时没有第三方依赖，不用 `npm install`。
+不想用 Docker：需要 Node.js 22.18+（Ubuntu 上用官方压缩包时还要 `apt install libatomic1`），把仓库放到 `/opt/tg-botsx`，写好 `.env`，用 [deploy/tg-botsx.service](deploy/tg-botsx.service) 启动。运行时没有第三方依赖，不用 `npm install`。
 
 ## 怎么用
 
@@ -120,7 +120,7 @@ tgbot update-all      更新所有机器人
 
 ## 费用
 
-只有服务器本身的费用。机器人很省资源，最便宜的 VPS 就够。
+只有服务器本身的费用。机器人很省资源，最便宜的 VPS 就够：实测刚启动、还没有聊天数据时，一个机器人的容器占约 100 MB 内存；Docker 本身的占用另算。
 
 ## 开发
 
