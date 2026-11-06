@@ -124,7 +124,7 @@ cmd_restore() {
   compose stop bot
   # 容器停了也能往数据卷里写：临时起一个只挂卷的容器
   local db_dir="/data${NAME:+/bots/$NAME}"
-  docker run --rm -e DB_DIR="$db_dir" -v "$(basename "$DIR")_data:/data" -v "$(realpath "$source"):/restore.db:ro" node:26-alpine \
+  docker run --rm -e DB_DIR="$db_dir" -v "$(basename "$DIR")_data:/data" -v "$(realpath "$source"):/restore.db:ro" node:26.13.0-alpine \
     sh -c 'rm -f "$DB_DIR/relay.db-wal" "$DB_DIR/relay.db-shm" && cp /restore.db "$DB_DIR/relay.db" && chown node:node "$DB_DIR/relay.db"'
   compose start bot
   printf '已恢复。\n'

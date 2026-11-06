@@ -18,10 +18,16 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run e2e
+      - run: node --disable-warning=ExperimentalWarning test/e2e/chaos.ts
 
   deploy-script:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 真实走一遍安装：不同系统版本和 ARM 服务器都要能装
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

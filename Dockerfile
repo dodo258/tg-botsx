@@ -1,5 +1,6 @@
 # 运行时没有第三方依赖：Node 自带 SQLite，也能把 TypeScript 转成 JavaScript，镜像里只有源码和转好的文件。
-FROM node:26-alpine
+# 写死版本：重新构建不会因为上游发新版而意外变化。要升级就改这里，跑完 CI 再上线
+FROM node:26.13.0-alpine
 WORKDIR /app
 COPY package.json ./
 COPY src ./src

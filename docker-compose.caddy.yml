@@ -5,7 +5,7 @@ services:
       WEB_LISTEN_PORT: "8443"
       WEB_IP_HEADER: x-forwarded-for
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.9-alpine
     restart: unless-stopped
     environment:
       WEB_DOMAIN: ${WEB_DOMAIN:-}

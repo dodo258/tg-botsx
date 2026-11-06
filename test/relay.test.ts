@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
+import { handleUpdate } from "../src/core/router.ts";
 import { broadcastTick, retryFailed, tick } from "../src/core/maintenance.ts";
 import { CLAIM_PAIRS, createClaim } from "../src/core/setup.ts";
 import { loadSettings } from "../src/core/settings.ts";
@@ -1770,6 +1771,45 @@ describe("第一次的自动回复", () => {
     expect(h.app.settings.welcomeImage).toBe(false);
     await h.fromUser(ALICE, "/start");
     expect(h.tg.named("sendPhoto")).toHaveLength(0);
+  });
+});
+
+describe("进程被杀后 Telegram 重发", () => {
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+  });
+  const privateMessage = (id: number, from: number, text: string) => ({ message: { message_id: id, date: 1, chat: { id: from, type: "private" }, from: { id: from, is_bot: false, first_name: "x" }, text } }) as never;
+
+  it("同一条更新发两次只处理一次", async () => {
+    const update = { update_id: 5555, ...(privateMessage(70, ALICE, "你好") as object) } as never;
+    await handleUpdate(h.app, update);
+    await handleUpdate(h.app, update);
+    expect(h.tg.named("copyMessage")).toHaveLength(1);
+  });
+
+  it("处理中途出错的更新也记下，不会一直卡着重试", async () => {
+    h.tg.failNext("sendMessage", 500, "Internal");
+    const update = { update_id: 5556, ...(privateMessage(71, ALICE, "/start") as object) } as never;
+    await handleUpdate(h.app, update);
+    h.tg.reset();
+    await handleUpdate(h.app, update);
+    expect(h.tg.calls).toHaveLength(0);
+  });
+
+  it("没来得及记下更新就被杀：重发的客户消息不再转一遍", async () => {
+    await h.send(privateMessage(72, ALICE, "你好"));
+    h.tg.reset();
+    await h.send(privateMessage(72, ALICE, "你好"));
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+  });
+
+  it("没来得及记下更新就被杀：重发的管理员回复不再发给客户一遍", async () => {
+    await h.fromUser(ALICE, "你好");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.send(privateMessage(800, OWNER, "回复"));
+    h.tg.reset();
+    await h.send(privateMessage(800, OWNER, "回复"));
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
   });
 });
 

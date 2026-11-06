@@ -123,9 +123,11 @@ async function routeMembership(app: App, update: ChatMemberUpdated): Promise<voi
 
 export async function handleUpdate(app: App, update: Update): Promise<void> {
   try {
-    // 去重：进程重启后 Telegram 可能重发还没确认的更新
-    const fresh = await app.db.prepare("INSERT OR IGNORE INTO seen_updates(update_id, seen_at) VALUES(?, ?)").bind(update.update_id, app.now()).run();
-    if (fresh === 0) return;
+    // 去重：进程重启后 Telegram 会重发还没确认的更新。处理完才记下来：
+    // 先记的话，处理途中被杀，重发时会被当成处理过，这条消息就永远丢了。
+    // 这样处理途中被杀会再处理一次，所以消息本身还要按编号再去重一次（见 inbound 和 outbound）
+    const seen = await app.db.prepare("SELECT update_id FROM seen_updates WHERE update_id = ?").bind(update.update_id).first();
+    if (seen) return;
     if (update.message) await routeMessage(app, update.message);
     else if (update.edited_message) await routeEdited(app, update.edited_message);
     else if (update.callback_query) await handleCallback(app, update.callback_query);
@@ -133,6 +135,12 @@ export async function handleUpdate(app: App, update: Update): Promise<void> {
     else if (update.my_chat_member) await routeMembership(app, update.my_chat_member);
   } catch (error) {
     app.log("error", `处理更新 ${update.update_id} 失败`, error instanceof Error ? error.message : String(error));
+  }
+  // 出错的也记下：同一条坏更新重发多少次都是错，不能卡住后面的消息
+  try {
+    await app.db.prepare("INSERT OR IGNORE INTO seen_updates(update_id, seen_at) VALUES(?, ?)").bind(update.update_id, app.now()).run();
+  } catch (error) {
+    app.log("error", `记录更新 ${update.update_id} 失败`, error instanceof Error ? error.message : String(error));
   }
 }
 

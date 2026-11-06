@@ -265,6 +265,8 @@ function startPayload(text: string | undefined): boolean {
 }
 
 export async function handleContactMessage(app: App, message: Message, user: User): Promise<void> {
+  // 上次处理到一半进程被杀，Telegram 重发的。已经入库了就不再转一遍
+  if (await findByUserMsg(app, user.id, message.message_id)) return;
   const { contact, isNew } = await touchContact(app, user);
   if (isNew) await bumpDaily(app, "new_contacts").run();
   const isStart = startPayload(message.text);

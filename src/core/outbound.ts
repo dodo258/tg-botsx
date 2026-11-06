@@ -129,6 +129,9 @@ export async function handleStaffMessage(app: App, message: Message, staffId: nu
     await bufferAlbum(app, { message, info, groupId: message.media_group_id, direction: "out", userId: contact.userId, staffId });
     return;
   }
+  // 上次处理到一半进程被杀，Telegram 重发的。已经发过就不再发给对方一遍
+  const sentBefore = await app.db.prepare("SELECT id FROM messages WHERE desk_chat_id = ? AND desk_msg_id = ? AND direction = 'out' LIMIT 1").bind(message.chat.id, message.message_id).first();
+  if (sentBefore) return;
   try {
     const quote = stored?.userMsgId ?? null;
     const copied = await app.tg.call<{ message_id: number }>("copyMessage", {

@@ -12,7 +12,8 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "start": "node src/runtime/node.ts",
-    "e2e": "node test/e2e/run.ts"
+    "e2e": "node test/e2e/run.ts",
+    "chaos": "node --disable-warning=ExperimentalWarning test/e2e/chaos.ts"
   },
   "devDependencies": {
     "@grammyjs/types": "^5.0.0",
