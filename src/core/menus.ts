@@ -100,6 +100,16 @@ export function renderMenu(app: App, page: string): Menu {
           ],
         },
       };
+    case "clean":
+      return {
+        text: `<b>🧹 自动清理</b>\n面板、提示、点过的命令到时间自动删掉，聊天窗口保持干净。别人的私信和你的回复不会动。\n\n现在：${s.uiCleanHours ? `${s.uiCleanHours} 小时后清理` : "不清理"}`,
+        keyboard: {
+          inline_keyboard: [
+            [1, 6, 24, 0].map((hours) => ({ text: `${s.uiCleanHours === hours ? "✅ " : ""}${hours ? `${hours} 小时` : "不清理"}`, callback_data: `mc:uiClean:${hours}` })),
+            BACK,
+          ],
+        },
+      };
     case "verify":
       return {
         text:
@@ -157,11 +167,10 @@ export function renderMenu(app: App, page: string): Menu {
         text:
           "<b>🗄 数据</b>\n\n" +
           `聊天内容保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}\n` +
-          `到期后抹掉文字和文件编号，联系人和回复关系还在，老消息依然能回复。\n\n<b>菜单消息自动清理</b>：${s.uiCleanHours ? `${s.uiCleanHours} 小时后` : "不清理"}\n面板、提示、点过的命令到时间自动删掉，聊天窗口保持干净。别人的私信和你的回复不会动。`,
+          "到期后抹掉文字和文件编号，联系人和回复关系还在，老消息依然能回复。",
         keyboard: {
           inline_keyboard: [
             [{ text: "🗓 改保留天数", callback_data: "mi:retentionDays" }],
-            [1, 6, 24, 0].map((hours) => ({ text: `${s.uiCleanHours === hours ? "✅ " : ""}${hours ? `${hours} 小时` : "不清理"}`, callback_data: `mc:uiClean:${hours}` })),
             [{ text: "🧹 手动清理", callback_data: "cl" }, { text: "📦 导出数据", callback_data: "ex" }],
             BACK,
           ],
@@ -174,6 +183,7 @@ export function renderMenu(app: App, page: string): Menu {
           inline_keyboard: [
             [{ text: "👋 第一次的自动回复", callback_data: "m:welcome" }, { text: "💬 自动回复", callback_data: "m:auto" }],
             [{ text: "🔐 人机验证", callback_data: "m:verify" }, { text: "🛡 防骚扰", callback_data: "m:filter" }],
+            [{ text: `🧹 自动清理：${s.uiCleanHours ? `${s.uiCleanHours} 小时` : "关"}`, callback_data: "m:clean" }],
             [{ text: "📥 消息收在哪", callback_data: "m:desk" }, { text: "🗄 数据", callback_data: "m:data" }],
             backRow(),
           ],

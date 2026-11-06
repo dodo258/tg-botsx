@@ -148,7 +148,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
     case "mc":
       if (arg === "uiClean" && ["0", "1", "6", "24"].includes(extra ?? "")) {
         await saveSetting(app.db, app.settings, "uiCleanHours", Number(extra));
-        const menu = renderMenu(app, "data");
+        const menu = renderMenu(app, "clean");
         await edit(ctx, menu.text, menu.keyboard);
         return true;
       }

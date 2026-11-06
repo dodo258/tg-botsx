@@ -2174,3 +2174,20 @@ describe("菜单消息自动清理", () => {
   });
 });
 
+describe("自动清理的入口", () => {
+  it("设置第一页就能看到状态并进去改，改完留在这一页", async () => {
+    h = await makeHarness({ verify: false });
+    await h.press(OWNER, OWNER, 1, "m:main");
+    const row = (h.tg.last("editMessageText").reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat().find((button) => button.text.includes("自动清理"));
+    expect(row?.text).toContain("24 小时");
+    await h.press(OWNER, OWNER, 1, row?.callback_data ?? "");
+    await h.press(OWNER, OWNER, 1, "mc:uiClean:6");
+    expect(String(h.tg.last("editMessageText").text)).toContain("6 小时后清理");
+    await h.press(OWNER, OWNER, 1, "m:main");
+    expect(JSON.stringify(h.tg.last("editMessageText").reply_markup)).toContain("自动清理：6 小时");
+    await h.press(OWNER, OWNER, 1, "mc:uiClean:0");
+    await h.press(OWNER, OWNER, 1, "m:main");
+    expect(JSON.stringify(h.tg.last("editMessageText").reply_markup)).toContain("自动清理：关");
+  });
+});
+
