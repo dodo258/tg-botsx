@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "传声筒：中文 Telegram 双向客服机器人，贴一个 Token 就能部署到自己的服务器",
+  "description": "传声筒：中文 Telegram 私人双向机器人。一条命令部署到自己的服务器，一台能跑多个机器人，数据互不相通",
   "license": "MIT",
   "engines": {
     "node": ">=22.18"
