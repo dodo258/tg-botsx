@@ -174,14 +174,16 @@ show_claim() {
     say "已经绑定过管理员了。要换人的话运行：$MANAGE claim"
     return
   fi
-  local username
+  local username pair
+  pair="$(printf '%s\n' "$logs" | grep -o '配对图案：.*' | tail -n 1 | sed 's/^配对图案：//' | tr -d '[:cntrl:]' || true)"
   username="$(printf '%s' "$link" | sed -n 's#^https://t.me/\([^?]*\)?.*#\1#p')"
-  say "用你要当管理员的 Telegram 账号打开 @$username，点「开始」，再点「成为管理员」就好了（10 分钟内有效）。"
+  say "用你要当管理员的 Telegram 账号打开 @$username，点「开始」，再点和下面一样的图案（10 分钟内有效）："
   say ""
-  say "  https://t.me/$username"
+  say "  配对图案：$pair"
+  say "  机器人：https://t.me/$username"
   say ""
-  say "按钮没出现的话，用这个链接：$link"
-  say "过期了运行 $MANAGE claim 重新生成。"
+  say "只有一次机会，点错按钮就失效，这时用这个链接绑定：$link"
+  say "都过期了运行 $MANAGE claim 重新生成。"
   wait_for_owner
 }
 
@@ -189,10 +191,15 @@ show_claim() {
 wait_for_owner() {
   [ -t 1 ] || return 0
   say ""
-  say "等你点按钮…不想等可以按 Ctrl+C，机器人不受影响。"
-  local waited=0 who
+  say "等你点图案…不想等可以按 Ctrl+C，机器人不受影响。"
+  local waited=0 who logs_now
   while [ "$waited" -lt 600 ]; do
-    who="$( (cd "$DIR" && docker compose logs --no-log-prefix bot 2>/dev/null) | grep -o '已绑定管理员：.*' | tail -n 1 | tr -d '[:cntrl:]' || true)"
+    logs_now="$(cd "$DIR" && docker compose logs --no-log-prefix bot 2>/dev/null || true)"
+    who="$(printf '%s\n' "$logs_now" | grep -o '已绑定管理员：.*' | tail -n 1 | tr -d '[:cntrl:]' || true)"
+    if [ -z "$who" ] && printf '%s\n' "$logs_now" | grep -q '绑定按钮已失效'; then
+      say "有人点错了图案，按钮已失效。如果不是你点的，说明有人在抢这个机器人。用上面的链接绑定，或运行 $MANAGE claim 换新图案。"
+      return 0
+    fi
     if [ -n "$who" ]; then
       say "$who"
       say "不是你本人的话，马上运行 $MANAGE claim，用新链接换回来。"

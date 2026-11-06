@@ -40,6 +40,7 @@ const first = await sudo("bash deploy/install.sh");
 console.log(first.out.split("\n").slice(-12).join("\n"));
 check("安装脚本成功退出", first.code === 0, first.out);
 check("输出了认领链接", /start=claim_/.test(first.out));
+check("输出了配对图案", /配对图案：\S+ \S+/.test(first.out), first.out);
 check("输出里没有 Token 明文", !first.out.includes(TOKEN));
 check(".env 权限是 600", execSync(`sudo stat -c %a ${DIR}/.env`, { encoding: "utf8" }).trim() === "600");
 check("tgbot 命令已安装", existsSync("/usr/local/bin/tgbot"));

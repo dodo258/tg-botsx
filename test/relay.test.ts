@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
+import { CLAIM_PAIRS, createClaim } from "../src/core/setup.ts";
 
 let h: Harness;
 
@@ -1073,28 +1074,75 @@ describe("管理面板：不打命令也能管理", () => {
     });
   });
 
-  describe("首次绑定：点按钮成为管理员", () => {
+  describe("首次绑定：点配对图案成为管理员", () => {
+    // 假随机总取最小值，所以配对的是第 0 个图案
+    const RIGHT = "claim:0";
+    const WRONG = "claim:1";
+
     beforeEach(async () => {
       h = await makeHarness({ verify: false, owner: false });
-      await h.set("claimExpiresAt", h.clock.now + 600);
-      await h.set("claimCode", "abc");
+      await createClaim(h.app);
     });
 
-    it("打开机器人就有按钮，点一下成为管理员并收到面板，窗口关闭", async () => {
+    it("打开机器人就有 12 个图案，点对成为管理员并收到面板，窗口关闭", async () => {
       await h.fromUser(OWNER, "/start");
-      expect(labels(h.tg.last("sendMessage"))).toEqual(["👑 成为管理员"]);
-      await h.press(OWNER, OWNER, 9, "claim");
+      expect(labels(h.tg.last("sendMessage"))).toEqual(CLAIM_PAIRS);
+      await h.press(OWNER, OWNER, 9, RIGHT);
       expect(h.app.settings.ownerId).toBe(OWNER);
       expect(h.app.settings.claimExpiresAt).toBe(0);
+      expect(h.app.settings.claimPair).toBe("");
       expect(h.tg.textsTo(OWNER).join()).toContain("绑定成功");
       expect(h.tg.textsTo(OWNER).at(-1)).toContain("管理面板");
       expect(num((await row("SELECT COUNT(*) AS n FROM contacts")).n)).toBe(0);
     });
 
-    it("第二个人点不到：别人抢不走已经绑定的机器人", async () => {
-      await h.fromUser(OWNER, "/start");
-      await h.press(OWNER, OWNER, 9, "claim");
-      await h.press(ALICE, ALICE, 9, "claim");
+    it("按钮和提示里都不泄露哪个是对的", async () => {
+      await h.fromUser(ALICE, "/start");
+      const prompt = h.tg.last("sendMessage");
+      expect(String(prompt.text)).not.toContain(h.app.settings.claimPair);
+      for (const button of buttons(prompt)) expect(button.callback_data).toMatch(/^claim:\d+$/);
+    });
+
+    it("点错一次按钮就失效，点对的人也进不来了", async () => {
+      await h.press(ALICE, ALICE, 9, WRONG);
+      await h.send({});
+      expect(h.app.settings.ownerId).toBeNull();
+      expect(String(h.tg.last("editMessageText").text)).toContain("图案不对");
+      await h.press(ALICE, ALICE, 9, RIGHT);
+      await h.send({});
+      expect(h.app.settings.ownerId).toBeNull();
+      await h.fromUser(BOB, "/start");
+      expect(labels(h.tg.last("sendMessage"))).toEqual([]);
+    });
+
+    it("别人故意点错后，部署的人用链接还能绑定", async () => {
+      await h.press(ALICE, ALICE, 9, WRONG);
+      await h.fromUser(OWNER, `/start claim_${h.app.settings.claimCode}`);
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(OWNER);
+    });
+
+    it("重新生成后按钮又能用了", async () => {
+      await h.press(ALICE, ALICE, 9, WRONG);
+      await h.send({});
+      await createClaim(h.app);
+      await h.press(OWNER, OWNER, 9, RIGHT);
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(OWNER);
+    });
+
+    it("乱写的按钮数据算点错", async () => {
+      for (const data of ["claim", "claim:99", "claim:abc"]) {
+        await createClaim(h.app);
+        await h.press(ALICE, ALICE, 9, data);
+        await h.send({});
+        expect(h.app.settings.ownerId, data).toBeNull();
+      }
+    });
+
+    it("已经绑定后别人再点没有用", async () => {
+      await h.press(OWNER, OWNER, 9, RIGHT);
+      await h.press(ALICE, ALICE, 9, RIGHT);
       await h.send({});
       expect(h.app.settings.ownerId).toBe(OWNER);
       expect(String(h.tg.last("editMessageText").text)).toContain("失效");
@@ -1104,9 +1152,8 @@ describe("管理面板：不打命令也能管理", () => {
     });
 
     it("超过时限按钮失效，也不再显示", async () => {
-      await h.fromUser(ALICE, "/start");
       h.clock.now += 601;
-      await h.press(ALICE, ALICE, 9, "claim");
+      await h.press(ALICE, ALICE, 9, RIGHT);
       await h.send({});
       expect(h.app.settings.ownerId).toBeNull();
       h.tg.reset();
@@ -1117,33 +1164,38 @@ describe("管理面板：不打命令也能管理", () => {
 
     it("已有管理员时生成新链接也不会出现按钮，换人只能走链接", async () => {
       await h.set("ownerId", OWNER);
-      await h.set("claimExpiresAt", h.clock.now + 600);
-      await h.press(ALICE, ALICE, 9, "claim");
+      await createClaim(h.app);
+      await h.press(ALICE, ALICE, 9, RIGHT);
       await h.send({});
       expect(h.app.settings.ownerId).toBe(OWNER);
       await h.fromUser(ALICE, "/start");
-      expect(h.tg.textsTo(ALICE).join()).not.toContain("成为管理员");
-      await h.fromUser(ALICE, "/start claim_abc");
+      expect(h.tg.textsTo(ALICE).join()).not.toContain("配对");
+      await h.fromUser(ALICE, `/start claim_${h.app.settings.claimCode}`);
       await h.send({});
       expect(h.app.settings.ownerId).toBe(ALICE);
       expect(h.tg.textsTo(OWNER).at(-1)).toContain("已被更换");
     });
 
     it("群里的按钮不算", async () => {
-      await h.press(ALICE, GROUP, 9, "claim");
+      await h.press(ALICE, GROUP, 9, RIGHT);
       await h.send({});
       expect(h.app.settings.ownerId).toBeNull();
+      expect(h.app.settings.claimPair).not.toBe("");
     });
 
-    it("绑定日志里去掉名字中的控制字符", async () => {
+    it("日志里去掉名字中的控制字符，点错也记下是谁", async () => {
       const logged: string[] = [];
       h.app.log = (_level, message, detail) => {
         logged.push(`${message}：${String(detail)}`);
       };
-      await h.send({ callback_query: { id: "c", from: { id: OWNER, is_bot: false, first_name: "假\n已绑定管理员：别人\u001b[2J" }, chat_instance: "x", data: "claim", message: { message_id: 9, date: 1, chat: { id: OWNER, type: "private" } } } } as never);
-      const line = logged.find((item) => item.startsWith("已绑定管理员"));
-      expect(line).toBeDefined();
-      expect(line).not.toMatch(/\p{Cc}/u);
+      const press = (data: string) =>
+        h.send({ callback_query: { id: "c", from: { id: OWNER, is_bot: false, first_name: "假\n已绑定管理员：别人\u001b[2J" }, chat_instance: "x", data, message: { message_id: 9, date: 1, chat: { id: OWNER, type: "private" } } } } as never);
+      await press(WRONG);
+      await createClaim(h.app);
+      await press(RIGHT);
+      expect(logged.some((item) => item.startsWith("绑定按钮已失效"))).toBe(true);
+      expect(logged.some((item) => item.startsWith("已绑定管理员"))).toBe(true);
+      for (const item of logged) expect(item).not.toMatch(/\p{Cc}/u);
     });
   });
 });

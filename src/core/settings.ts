@@ -39,6 +39,8 @@ export interface Settings {
   botUsername: string;
   claimCode: string;
   claimExpiresAt: number;
+  /** 首次绑定的配对图案，只显示在服务器终端。空字符串表示按钮已失效 */
+  claimPair: string;
   /** 私聊模式下上一张会话卡片属于谁，换人时要重新发卡片 */
   lastCardUser: number;
   lastMaintenanceDay: string;
@@ -72,6 +74,7 @@ export const DEFAULT_SETTINGS: Settings = {
   botUsername: "",
   claimCode: "",
   claimExpiresAt: 0,
+  claimPair: "",
   lastCardUser: 0,
   lastMaintenanceDay: "",
 };

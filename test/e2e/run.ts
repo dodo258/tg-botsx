@@ -51,6 +51,7 @@ async function testNode(fake: FakeServer): Promise<void> {
   try {
     const linked = await waitFor("打印认领链接", () => log.join("").includes("start=claim_"));
     check("启动后打印认领链接", linked, log.join(""));
+    check("启动后打印配对图案", /配对图案：\S+ \S+/.test(log.join("")), log.join(""));
     check("启动时删除旧 Webhook", fake.named("deleteWebhook").length === 1);
     const code = /claim_([\w-]+)/.exec(log.join(""))?.[1] ?? "";
 
