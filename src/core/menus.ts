@@ -35,8 +35,9 @@ export async function renderPanel(app: App, owner: boolean, staffId?: number): P
   ];
   if (owner) {
     rows.push(
-      [{ text: "📢 群发", callback_data: "bc" }, { text: "📊 统计", callback_data: "p:stats" }],
-      [{ text: "⚙️ 设置", callback_data: "m:main" }, { text: "📂 更多", callback_data: "p:more" }],
+      [{ text: "📢 群发", callback_data: "bc" }, { text: "⏰ 定时发送", callback_data: "sch" }],
+      [{ text: "📊 统计", callback_data: "p:stats" }, { text: "⚙️ 设置", callback_data: "m:main" }],
+      [{ text: "📂 更多", callback_data: "p:more" }],
     );
   } else {
     // 同事的「更多」里只会剩一个，不值得多点一下
@@ -88,6 +89,17 @@ export function renderMenu(app: App, page: string): Menu {
           ],
         },
       };
+    case "welcome":
+      return {
+        text: `<b>👋 第一次的自动回复</b>\n陌生人第一次私信机器人时发一次，之后不再发。\n\n<b>文字：</b>\n${clipHtml(s.welcome, 2500) || "（没有）"}\n\n<b>图片：</b>${s.welcomeImage ? "已设置" : "没有"}`,
+        keyboard: {
+          inline_keyboard: [
+            [{ text: "✏️ 改文字", callback_data: "mi:welcome" }, { text: s.welcomeImage ? "🖼 换图片" : "🖼 加图片", callback_data: "mi:welcomePhoto" }],
+            ...(s.welcomeImage ? [[{ text: "🗑 去掉图片", callback_data: "mc:welcomePhoto:off" }]] : []),
+            BACK,
+          ],
+        },
+      };
     case "verify":
       return {
         text:
@@ -106,12 +118,11 @@ export function renderMenu(app: App, page: string): Menu {
       return {
         text:
           "<b>💬 自动回复</b>\n\n" +
-          `<b>第一次的自动回复</b>（陌生人第一次私信时发一次${s.welcomeImage ? "，带图片" : ""}）：\n${clipHtml(s.welcome, 900)}\n\n` +
-          `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：每条消息上打 👌，隔了 30 天再来才发这句话：\n${clipHtml(s.receipt, 900)}\n\n` +
+                    `<b>收到回执</b>（${onOff(s.receiptEnabled)}）：每条消息上打 👌，隔了 30 天再来才发这句话：\n${clipHtml(s.receipt, 900)}\n\n` +
           `<b>离线回复</b>（${onOff(s.offlineEnabled)}，在线时段 ${s.onlineFrom}:00–${s.onlineTo}:00，${escapeHtml(s.timezone)}）：\n${clipHtml(s.offlineMessage, 900)}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "👋 改第一次自动回复", callback_data: "mi:welcome" }, ...(s.welcomeImage ? [{ text: "🖼 去掉图片", callback_data: "mc:welcomePhoto:off" }] : [])],
+            [{ text: "👋 第一次的自动回复", callback_data: "m:welcome" }],
             [{ text: toggle(s.receiptEnabled, "收到回执"), callback_data: "mt:receiptEnabled" }, { text: "✏️ 改回执文字", callback_data: "mi:receipt" }],
             [{ text: toggle(s.offlineEnabled, "离线回复"), callback_data: "mt:offlineEnabled" }, { text: "✏️ 改离线文字", callback_data: "mi:offlineMessage" }],
             [{ text: "🕘 改在线时段", callback_data: "mi:onlineHours" }, { text: "🌏 改时区", callback_data: "mi:timezone" }],
@@ -160,7 +171,7 @@ export function renderMenu(app: App, page: string): Menu {
         text: `<b>⚙️ 设置</b>\n\n消息收在：${deskModeLabel(s)}\n人机验证：${s.verifyMode === "quiz" ? "开" : "关"}\n聊天保留：${s.retentionDays === 0 ? "永久" : `${s.retentionDays} 天`}`,
         keyboard: {
           inline_keyboard: [
-            [{ text: "👋 第一次自动回复", callback_data: "mi:welcome" }, { text: "💬 自动回复", callback_data: "m:auto" }],
+            [{ text: "👋 第一次的自动回复", callback_data: "m:welcome" }, { text: "💬 自动回复", callback_data: "m:auto" }],
             [{ text: "🔐 人机验证", callback_data: "m:verify" }, { text: "🛡 防骚扰", callback_data: "m:filter" }],
             [{ text: "📥 消息收在哪", callback_data: "m:desk" }, { text: "🗄 数据", callback_data: "m:data" }],
             backRow(),
@@ -209,7 +220,13 @@ function textInput(prompt: string, key: "welcome" | "receipt" | "offlineMessage"
 }
 
 export const INPUTS: Record<string, InputSpec> = {
-  welcome: textInput("发来新的第一次自动回复。可以只有文字，也可以发一张带说明的图片。", "welcome"),
+  welcome: textInput("发来新的文字。", "welcome"),
+  welcomePhoto: {
+    prompt: "发来一张图片。",
+    async apply() {
+      return "这里要发图片。";
+    },
+  },
   receipt: textInput("发来新的收到回执。", "receipt"),
   offlineMessage: textInput("发来新的离线回复。", "offlineMessage"),
   verifyTtlDays: intInput("验证多少天有效？发 0 表示通过一次永久有效。", "verifyTtlDays", 0, 3650),
@@ -310,13 +327,13 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
     return false;
   }
   // 第一次自动回复可以带图片：发图就换图，图片说明就是文字
-  if (awaiting === "welcome" && message.photo?.length) {
+  if ((awaiting === "welcome" || awaiting === "welcomePhoto") && message.photo?.length) {
     await saveSetting(app.db, app.settings, "welcomePhotoId", message.photo.at(-1)?.file_id ?? "");
     await saveSetting(app.db, app.settings, "welcomeImage", true);
     await app.db.prepare("DELETE FROM assets WHERE name = 'welcome'").run();
     if (message.caption) await saveSetting(app.db, app.settings, "welcome", message.caption.slice(0, 2000));
     await clearAwaiting(app, staffId, message.chat.id);
-    await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回设置", callback_data: "m:main" }]] });
+    await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回", callback_data: "m:welcome" }]] });
     return true;
   }
   if (!text) {
@@ -345,6 +362,6 @@ export async function handleAwaitingInput(app: App, message: Message, staffId: n
     return true;
   }
   await clearAwaiting(app, staffId, message.chat.id);
-  await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回设置", callback_data: "m:main" }]] });
+  await reply("已保存。", { inline_keyboard: [[{ text: "⬅️ 返回", callback_data: awaiting === "welcome" ? "m:welcome" : "m:main" }]] });
   return true;
 }

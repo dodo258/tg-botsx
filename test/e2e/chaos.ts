@@ -22,6 +22,7 @@ let confirmed = 0;
 let nextMsg = 9000;
 const pending: { update_id: number }[] = [];
 const copies = new Map<number, number>();
+const scheduled = new Map<number, number>();
 
 const server = createServer((req, res) => {
   let raw = "";
@@ -49,6 +50,7 @@ const server = createServer((req, res) => {
     if (mode === "hang" && method === "copyMessage") return; // 不回应，等客户端超时
     if (mode === "500") return send(502, { ok: false, error_code: 502, description: "Bad Gateway" });
     if (mode === "429" && method === "copyMessage") return send(429, { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 1 } });
+    if (method === "sendMessage" && body.text === "定时内容") scheduled.set(Number(body.chat_id), (scheduled.get(Number(body.chat_id)) ?? 0) + 1);
     if (method === "copyMessage" && body.chat_id === OWNER) copies.set(Number(body.message_id), (copies.get(Number(body.message_id)) ?? 0) + 1);
     if (["copyMessage", "sendMessage", "forwardMessage", "sendDocument"].includes(method)) return send(200, { ok: true, result: { message_id: nextMsg++ } });
     return send(200, { ok: true, result: true });
@@ -145,6 +147,26 @@ await sleep(6000);
 mode = "ok";
 await drain(90_000);
 if (!report("被限流后恢复")) failed++;
+
+// 定时发送途中被强杀：每个联系人都要收到，最多多收一次，不能从头再发一遍
+{
+  const scheduleDb = new DatabaseSync(join(dataDir, "relay.db"));
+  scheduleDb.prepare("INSERT INTO schedules(text, repeat_kind, times, run_at, enabled, created_at) VALUES('定时内容', 'daily', '00:00', ?, 1, 1)").run(Math.floor(Date.now() / 1000));
+  scheduleDb.close();
+  const until = Date.now() + 40_000;
+  while (scheduled.size === 0 && Date.now() < until) await sleep(5);
+  bot.kill("SIGKILL");
+  kills++;
+  await sleep(300);
+  bot = start();
+  const end = Date.now() + 70_000;
+  while (scheduled.size < 20 && Date.now() < end) await sleep(500);
+  await sleep(25_000);
+  const most = Math.max(0, ...scheduled.values());
+  const pass = scheduled.size === 20 && most <= 2 && [...scheduled.values()].filter((count) => count > 1).length <= 1;
+  console.log(`${pass ? "通过" : "失败"}  定时发送途中强杀：${scheduled.size}/20 人收到，最多收到 ${most} 次`);
+  if (!pass) failed++;
+}
 
 // 长跑：看内存涨不涨
 const minutes = Number(process.argv[2] ?? 0);

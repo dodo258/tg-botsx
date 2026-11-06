@@ -252,6 +252,18 @@ async function testWeb(fake: FakeServer): Promise<void> {
     const notImage = await call("POST", "/api/bots/friend-bot/settings", { image: "data:image/png;base64,bm90IGltYWdl" });
     check("假图片被拒绝", notImage.status === 400 && notImage.raw.includes("不是有效的图片"), notImage.raw);
     check("没登录拿不到图片", (await (async () => { const saved = cookie; cookie = ""; const r = await call("GET", "/api/bots/friend-bot/image"); cookie = saved; return r; })()).status === 401);
+    const badTime = await call("POST", "/api/bots/friend-bot/schedules", { text: "x", repeat: "daily", times: ["25:00"] });
+    check("定时发送：时间不对说清楚", badTime.status === 400 && badTime.raw.includes("不是有效的时间"), badTime.raw);
+    const noDay = await call("POST", "/api/bots/friend-bot/schedules", { text: "x", repeat: "weekly", times: ["9:00"], weekdays: [] });
+    check("定时发送：每周要选一天", noDay.status === 400, noDay.raw);
+    const madeSchedule = await call("POST", "/api/bots/friend-bot/schedules", { text: "早安", image: png, repeat: "weekly", weekdays: [1, 3], times: ["18:30", "9:00"] });
+    check("定时发送：网页能建多时间多天", madeSchedule.status === 200 && String(madeSchedule.data.when).includes("每周一、三 09:00、18:30") && madeSchedule.data.hasImage === true, madeSchedule.raw);
+    const listSchedules = await call("GET", "/api/bots/friend-bot/schedules");
+    check("定时发送：网页能看到列表", (listSchedules.data.schedules as unknown[]).length === 1, listSchedules.raw);
+    const scheduleId = String(madeSchedule.data.id);
+    const paused = await call("POST", `/api/bots/friend-bot/schedules/${scheduleId}/toggle`, {});
+    check("定时发送：网页能暂停", paused.data.enabled === false, paused.raw);
+    check("定时发送：网页能删除", (await call("DELETE", `/api/bots/friend-bot/schedules/${scheduleId}`)).status === 200 && (await call("GET", "/api/bots/friend-bot/schedules")).raw.includes('"schedules":[]'));
     const noImage = await call("POST", "/api/bots/friend-bot/settings", { removeImage: true });
     check("网页能去掉图片", noImage.data.hasImage === false, noImage.raw);
     check("删不存在的机器人报错", (await call("DELETE", "/api/bots/nope")).status === 404);

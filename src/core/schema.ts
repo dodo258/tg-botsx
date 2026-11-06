@@ -152,6 +152,24 @@ const MIGRATIONS: string[] = [
   `
   CREATE TABLE assets(name TEXT PRIMARY KEY, mime TEXT NOT NULL, data TEXT NOT NULL);
   `,
+  // 定时发送。到点变成一次群发，所以群发要能记下内容来自哪条定时
+  `
+  CREATE TABLE schedules(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL DEFAULT '',
+    photo_id TEXT NOT NULL DEFAULT '',
+    has_asset INTEGER NOT NULL DEFAULT 0,
+    repeat_kind TEXT NOT NULL DEFAULT 'draft',
+    times TEXT NOT NULL DEFAULT '',
+    weekdays TEXT NOT NULL DEFAULT '',
+    run_at INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_run INTEGER,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_schedules_due ON schedules(enabled, run_at);
+  ALTER TABLE broadcasts ADD COLUMN schedule_id INTEGER;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

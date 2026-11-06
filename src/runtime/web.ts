@@ -6,6 +6,8 @@ import { createServer } from "node:https";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { freemem as osFree, totalmem } from "node:os";
 import { join } from "node:path";
+import { activateSchedule, CAPTION_LIMIT, countRecipients, createDraft, deleteSchedule, describeRepeat, getSchedule, listSchedules, parseOnce, parseTimes, scheduleState, TEXT_LIMIT, toggleSchedule } from "../core/schedule.ts";
+import type { Schedule } from "../core/schedule.ts";
 import { saveSetting, loadSettings } from "../core/settings.ts";
 import { addBot, allNames, assignOwner, dbPath, DEFAULT_NAME, describeSafely, removeBot, replaceToken } from "./fleet.ts";
 import type { BotInfo, FleetEnv } from "./fleet.ts";
@@ -82,6 +84,17 @@ const IMAGE_MAGIC: Record<string, (bytes: Buffer) => boolean> = {
   "image/png": (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
   "image/webp": (b) => b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP",
 };
+
+function parseImage(image: string): { mime: string; bytes: Buffer } | null {
+  if (!image) return null;
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(image);
+  if (!match) throw new HttpError(400, "图片只支持 JPG、PNG、WebP。");
+  const bytes = Buffer.from(match[2] ?? "", "base64");
+  if (bytes.length > MAX_IMAGE) throw new HttpError(400, "图片太大了，请控制在 5 MB 以内。");
+  const mime = match[1] ?? "";
+  if (!IMAGE_MAGIC[mime]?.(bytes)) throw new HttpError(400, "这个文件不是有效的图片。");
+  return { mime, bytes };
+}
 
 async function readJson(req: IncomingMessage, max = MAX_BODY): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -169,6 +182,61 @@ export function startWeb(options: WebOptions): Server {
     }
   };
 
+  async function schedulesApi(req: IncomingMessage, name: string, method: string, rawId: string | undefined, sub: string | undefined): Promise<unknown> {
+    const db = sqliteDb(dbPath(env, name));
+    const nowSeconds = now();
+    try {
+      const settings = await loadSettings(db);
+      const timezone = settings.timezone;
+      const view = (item: Schedule) => ({ id: item.id, text: item.text, hasImage: item.hasAsset || item.photoId !== "", enabled: item.enabled, when: describeRepeat(item, timezone), state: scheduleState(item, timezone), canToggle: item.enabled || item.repeat !== "once" || item.lastRun === null });
+      if (rawId === undefined) {
+        if (method === "GET") return { schedules: (await listSchedules(db)).map(view), recipients: await countRecipients(db, settings.ownerId), timezone };
+        if (method !== "POST") throw new HttpError(404, "没有这个接口。");
+        const body = await readJson(req, MAX_UPLOAD_BODY);
+        const parsed = parseImage(text(body.image));
+        const content = text(body.text);
+        if (!parsed && !content.trim()) throw new HttpError(400, "写点文字或者选一张图片。");
+        if (parsed && content.length > CAPTION_LIMIT) throw new HttpError(400, `带图片时文字最多 ${CAPTION_LIMIT} 字（Telegram 的限制）。`);
+        if (content.length > TEXT_LIMIT) throw new HttpError(400, `文字太长了，请控制在 ${TEXT_LIMIT} 字以内。`);
+        const kind = text(body.repeat);
+        if (kind !== "once" && kind !== "daily" && kind !== "weekly") throw new HttpError(400, "选一下多久发一次。");
+        const content2 = { text: content, ...(parsed ? { asset: { mime: parsed.mime, data: parsed.bytes.toString("base64") } } : {}) };
+        let plan: Parameters<typeof activateSchedule>[2];
+        if (kind === "once") {
+          const once = parseOnce(`${text(body.date)} ${text(body.time)}`.trim(), timezone, nowSeconds);
+          if (typeof once === "string") throw new HttpError(400, once);
+          plan = { repeat: "once", ...once };
+        } else {
+          const times = parseTimes(Array.isArray(body.times) ? body.times.map(text).join(" ") : "");
+          if (typeof times === "string") throw new HttpError(400, times);
+          const weekdays = Array.isArray(body.weekdays) ? [...new Set(body.weekdays.map(Number))].filter((day) => Number.isInteger(day) && day >= 0 && day <= 6) : [];
+          if (kind === "weekly" && weekdays.length === 0) throw new HttpError(400, "至少选一天。");
+          plan = { repeat: kind, times, weekdays };
+        }
+        const id = await createDraft(db, content2, nowSeconds);
+        await activateSchedule(db, id, plan, timezone, nowSeconds);
+        const created = await getSchedule(db, id);
+        return created ? view(created) : {};
+      }
+      const id = Number(rawId);
+      const item = await getSchedule(db, id);
+      if (!item) throw new HttpError(404, "这条定时已经没有了。");
+      if (method === "DELETE" && !sub) {
+        await deleteSchedule(db, id, nowSeconds);
+        return { ok: true };
+      }
+      if (method === "POST" && sub === "toggle") {
+        const failure = await toggleSchedule(db, item, timezone, nowSeconds);
+        if (failure) throw new HttpError(400, failure);
+        const fresh = await getSchedule(db, id);
+        return fresh ? view(fresh) : {};
+      }
+      throw new HttpError(404, "没有这个接口。");
+    } finally {
+      db.close();
+    }
+  }
+
   async function api(req: IncomingMessage, res: ServerResponse, path: string): Promise<unknown> {
     const method = req.method ?? "GET";
     syncAuth();
@@ -233,10 +301,12 @@ export function startWeb(options: WebOptions): Server {
       }
       return { results };
     }
-    const match = /^\/api\/bots\/([^/]+)(?:\/(assign|token|settings|image))?$/.exec(path);
+    const match = /^\/api\/bots\/([^/]+)(?:\/(assign|token|settings|image|schedules)(?:\/(\d+)(?:\/(toggle))?)?)?$/.exec(path);
     if (!match) throw new HttpError(404, "没有这个接口。");
     const name = requireBot(decodeURIComponent(match[1] ?? ""));
     const action = match[2];
+    if (action === "schedules") return await schedulesApi(req, name, method, match[3], match[4]);
+    if (match[3]) throw new HttpError(404, "没有这个接口。");
     if (!action && method === "DELETE") {
       removeBot(env, name);
       return { ok: true };
@@ -268,12 +338,9 @@ export function startWeb(options: WebOptions): Server {
         try {
           const settings = await loadSettings(db);
           // 先校验再写，一项不对就都不改
-          const image = text(body.image);
-          const upload = image ? /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(image) : null;
-          if (image && !upload) throw new HttpError(400, "图片只支持 JPG、PNG、WebP。");
-          const bytes = upload ? Buffer.from(upload[2] ?? "", "base64") : null;
-          if (bytes && bytes.length > MAX_IMAGE) throw new HttpError(400, "图片太大了，请控制在 5 MB 以内。");
-          if (bytes && upload && !IMAGE_MAGIC[upload[1] ?? ""]?.(bytes)) throw new HttpError(400, "这个文件不是有效的图片。");
+          const parsed = parseImage(text(body.image));
+          const bytes = parsed ? parsed.bytes : null;
+          const upload = parsed ? [ "", parsed.mime ] : null;
           const willHaveImage = bytes !== null || (settings.welcomeImage && body.removeImage !== true);
           if (typeof body.welcome === "string") {
             if ((!body.welcome.trim() && !willHaveImage) || body.welcome.length > 2000) throw new HttpError(400, "自动回复不能是空的（有图片时可以不写字），也不能超过 2000 字。");

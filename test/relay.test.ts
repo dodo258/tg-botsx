@@ -4,6 +4,7 @@ import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
 import { handleUpdate } from "../src/core/router.ts";
 import { broadcastTick, retryFailed, tick } from "../src/core/maintenance.ts";
+import { activateSchedule, createDraft, deleteSchedule, getSchedule, nextRun, parseOnce, parseTimes, scheduleState, scheduleTick, toggleSchedule } from "../src/core/schedule.ts";
 import { CLAIM_PAIRS, createClaim } from "../src/core/setup.ts";
 import { loadSettings } from "../src/core/settings.ts";
 import { cryptoRng, makeChallenge } from "../src/core/verify.ts";
@@ -910,7 +911,7 @@ describe("管理面板：不打命令也能管理", () => {
   it("主人发 /start 看到面板，能点到全部管理功能", async () => {
     await h.fromOwner("/start");
     const home = labels(h.tg.last("sendMessage")).join("、");
-    for (const name of ["最近会话", "搜索联系人", "快捷回复", "隔离区", "群发", "统计", "设置", "更多"]) expect(home).toContain(name);
+    for (const name of ["最近会话", "搜索联系人", "快捷回复", "隔离区", "群发", "定时发送", "统计", "设置", "更多"]) expect(home).toContain(name);
     for (const button of buttons(h.tg.last("sendMessage"))) expect(new TextEncoder().encode(button.callback_data ?? "").length).toBeLessThanOrEqual(64);
     await h.press(OWNER, OWNER, 1, "p:more");
     const more = labels(h.tg.last("editMessageText")).join("、");
@@ -920,7 +921,10 @@ describe("管理面板：不打命令也能管理", () => {
 
   it("欢迎语从设置第一页就能改，不用再进一层", async () => {
     await h.press(OWNER, OWNER, 1, "m:main");
-    expect(dataOf(h.tg.last("editMessageText"), "第一次自动回复")).toBe("mi:welcome");
+    expect(dataOf(h.tg.last("editMessageText"), "第一次的自动回复")).toBe("m:welcome");
+    await h.press(OWNER, OWNER, 1, "m:welcome");
+    expect(dataOf(h.tg.last("editMessageText"), "改文字")).toBe("mi:welcome");
+    expect(dataOf(h.tg.last("editMessageText"), "加图片")).toBe("mi:welcomePhoto");
   });
 
   it("陌生人发 /start 看不到面板，按面板按钮也没有反应", async () => {
@@ -1810,6 +1814,230 @@ describe("进程被杀后 Telegram 重发", () => {
     h.tg.reset();
     await h.send(privateMessage(800, OWNER, "回复"));
     expect(h.tg.named("copyMessage")).toHaveLength(0);
+  });
+});
+
+describe("定时发送", () => {
+  const TZ = "Asia/Shanghai";
+  const at = (text: string) => Date.parse(`${text}+08:00`) / 1000;
+  const buttons = (params: Record<string, unknown>) => ((params.reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard).flat();
+  const data = (params: Record<string, unknown>, text: string) => {
+    const found = buttons(params).find((button) => button.text.includes(text))?.callback_data;
+    if (!found) throw new Error(`没有按钮 ${text}`);
+    return found;
+  };
+
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+    h.clock.now = at("2026-11-09T08:00:00"); // 周一
+    await h.fromUser(ALICE, "a");
+    await h.fromUser(BOB, "b");
+    h.tg.reset();
+  });
+
+  const makeDaily = async (times: string[]) => {
+    const id = await createDraft(h.app.db, { text: "早安" }, h.clock.now);
+    await activateSchedule(h.app.db, id, { repeat: "daily", times, weekdays: [] }, TZ, h.clock.now);
+    return id;
+  };
+
+  it("时间计算：每天多个时间取最近的，过了今天算明天", () => {
+    expect(nextRun("daily", ["09:00", "18:30"], [], TZ, at("2026-11-09T08:00:00"))).toBe(at("2026-11-09T09:00:00"));
+    expect(nextRun("daily", ["09:00", "18:30"], [], TZ, at("2026-11-09T09:00:00"))).toBe(at("2026-11-09T18:30:00"));
+    expect(nextRun("daily", ["09:00", "18:30"], [], TZ, at("2026-11-09T19:00:00"))).toBe(at("2026-11-10T09:00:00"));
+  });
+
+  it("时间计算：每周多天，今天的过了跳到下一个选中的日子", () => {
+    expect(nextRun("weekly", ["09:00"], [1, 3], TZ, at("2026-11-09T10:00:00"))).toBe(at("2026-11-11T09:00:00"));
+    expect(nextRun("weekly", ["09:00"], [1], TZ, at("2026-11-09T10:00:00"))).toBe(at("2026-11-16T09:00:00"));
+  });
+
+  it("时间计算：跨夏令时也是当地的那个钟点", () => {
+    const zone = "America/New_York";
+    const next = nextRun("daily", ["09:00"], [], zone, Date.parse("2026-03-07T20:00:00Z") / 1000);
+    expect(new Date(next * 1000).toISOString()).toBe("2026-03-08T13:00:00.000Z");
+  });
+
+  it("解析时间：多个时间、全角冒号、排序去重，写错说清楚", () => {
+    expect(parseTimes("18:30 9：00，9:00")).toEqual(["09:00", "18:30"]);
+    expect(String(parseTimes("25:00"))).toContain("不是有效的时间");
+    expect(String(parseTimes("明天"))).toContain("不是有效的时间");
+    expect(parseOnce("明天 9:30", TZ, at("2026-11-09T08:00:00"))).toMatchObject({ runAt: at("2026-11-10T09:30:00") });
+    expect(parseOnce("2:00", TZ, at("2026-11-09T08:00:00"))).toMatchObject({ runAt: at("2026-11-10T02:00:00") });
+    expect(parseOnce("11-7 9:30", TZ, at("2026-11-09T08:00:00"))).toMatchObject({ runAt: at("2027-11-07T09:30:00") });
+    expect(String(parseOnce("2020-01-01 9:30", TZ, at("2026-11-09T08:00:00")))).toContain("已经过了");
+    expect(String(parseOnce("2-30 9:30", TZ, at("2026-11-09T08:00:00")))).toContain("没有这一天");
+  });
+
+  it("到点发给所有联系人，已屏蔽和拉黑机器人的不发；没到点不发", async () => {
+    await h.fromUser(7001, "c");
+    await h.fromUser(7002, "d");
+    await h.app.db.prepare("UPDATE contacts SET blocked_at = 1 WHERE user_id = 7001").run();
+    await h.app.db.prepare("UPDATE contacts SET unreachable_at = 1 WHERE user_id = 7002").run();
+    await makeDaily(["09:00"]);
+    h.tg.reset();
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+    h.clock.now = at("2026-11-09T09:00:00");
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual(["早安"]);
+    expect(h.tg.textsTo(BOB)).toEqual(["早安"]);
+    expect(h.tg.textsTo(7001)).toEqual([]);
+    expect(h.tg.textsTo(7002)).toEqual([]);
+  });
+
+  it("一天多个时间各发一次，同一个时间点反复跑定时任务不重复", async () => {
+    await makeDaily(["09:00", "18:30"]);
+    h.clock.now = at("2026-11-09T09:00:00");
+    for (let index = 0; index < 4; index++) await tick(h.app);
+    h.clock.now += 40;
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual(["早安"]);
+    h.clock.now = at("2026-11-09T18:30:00");
+    for (let index = 0; index < 3; index++) await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual(["早安", "早安"]);
+    expect(num((await row("SELECT run_at FROM schedules")).run_at)).toBe(at("2026-11-10T09:00:00"));
+  });
+
+  it("只发一次的发完就停，显示已发送", async () => {
+    const id = await createDraft(h.app.db, { text: "活动" }, h.clock.now);
+    await activateSchedule(h.app.db, id, { repeat: "once", time: "09:00", runAt: at("2026-11-09T09:00:00") }, TZ, h.clock.now);
+    h.clock.now = at("2026-11-09T09:00:00");
+    await tick(h.app);
+    await tick(h.app);
+    h.clock.now += 86_400;
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual(["活动"]);
+    const saved = await getSchedule(h.app.db, id);
+    expect(saved && scheduleState(saved, TZ)).toBe("已发送");
+  });
+
+  it("服务器停机错过太久：不补发，告诉主人，下次照常", async () => {
+    await makeDaily(["09:00"]);
+    h.clock.now = at("2026-11-09T20:00:00");
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+    expect(h.tg.textsTo(OWNER).join()).toContain("错过了时间");
+    expect(num((await row("SELECT run_at FROM schedules")).run_at)).toBe(at("2026-11-10T09:00:00"));
+  });
+
+  it("已有群发在跑时等它结束，不会一起发", async () => {
+    await h.app.db.prepare("INSERT INTO broadcasts(from_chat_id, from_msg_id, report_chat_id, total, created_at, state) VALUES(?, 1, ?, 2, 1, 'running')").bind(OWNER, OWNER).run();
+    await makeDaily(["09:00"]);
+    h.clock.now = at("2026-11-09T09:00:00");
+    await scheduleTick(h.app);
+    expect(num((await row("SELECT COUNT(*) AS n FROM broadcasts")).n)).toBe(1);
+    await tick(h.app);
+    await tick(h.app);
+    await tick(h.app);
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual(["早安"]);
+  });
+
+  it("发到一半被限流或断网，下一轮接着发，不重发已发的", async () => {
+    await makeDaily(["09:00"]);
+    h.clock.now = at("2026-11-09T09:00:00");
+    await scheduleTick(h.app);
+    h.tg.failNext("sendMessage", 429, "Too Many Requests", 1);
+    await broadcastTick(h.app);
+    expect(num((await row("SELECT sent FROM broadcasts")).sent)).toBe(0);
+    await broadcastTick(h.app);
+    await broadcastTick(h.app);
+    // 第一次被限流拒绝，对方没收到；之后每人成功一次
+    expect(num((await row("SELECT sent FROM broadcasts")).sent)).toBe(2);
+    expect(num((await row("SELECT failed FROM broadcasts")).failed)).toBe(0);
+    expect((await row("SELECT state FROM broadcasts")).state).toBe("done");
+  });
+
+  it("对方拉黑了机器人：记下来，下次不发", async () => {
+    await makeDaily(["09:00"]);
+    h.clock.now = at("2026-11-09T09:00:00");
+    h.tg.failNext("sendMessage", 403, "Forbidden: bot was blocked by the user");
+    await tick(h.app);
+    await tick(h.app);
+    expect(num((await row("SELECT COUNT(*) AS n FROM contacts WHERE unreachable_at IS NOT NULL")).n)).toBe(1);
+  });
+
+  it("暂停后不发，恢复后从现在算，错过的不补；删除时停掉正在发的", async () => {
+    const id = await makeDaily(["09:00"]);
+    const first = await getSchedule(h.app.db, id);
+    if (first) await toggleSchedule(h.app.db, first, TZ, h.clock.now);
+    h.clock.now = at("2026-11-09T09:00:00");
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+    const paused = await getSchedule(h.app.db, id);
+    if (paused) expect(await toggleSchedule(h.app.db, paused, TZ, h.clock.now)).toBeNull();
+    expect(num((await row("SELECT run_at FROM schedules")).run_at)).toBe(at("2026-11-10T09:00:00"));
+    h.clock.now = at("2026-11-10T09:00:00");
+    await scheduleTick(h.app);
+    await deleteSchedule(h.app.db, id, h.clock.now);
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+    expect((await row("SELECT state FROM broadcasts")).state).toBe("cancelled");
+  });
+
+  it("带图片：发图片和文字，说明超长被拒绝", async () => {
+    const id = await createDraft(h.app.db, { text: "看图", photoId: "pid" }, h.clock.now);
+    await activateSchedule(h.app.db, id, { repeat: "daily", times: ["09:00"], weekdays: [] }, TZ, h.clock.now);
+    h.clock.now = at("2026-11-09T09:00:00");
+    await tick(h.app);
+    expect(h.tg.named("sendPhoto").filter((params) => params.chat_id === ALICE)[0]).toMatchObject({ photo: "pid", caption: "看图" });
+  });
+
+  it("菜单一路点完：每周一、三，两个时间", async () => {
+    await h.fromOwner("/menu");
+    expect(data(h.tg.last("sendMessage"), "定时发送")).toBe("sch");
+    await h.press(OWNER, OWNER, 1, "sch");
+    await h.press(OWNER, OWNER, 1, data(h.tg.last("editMessageText"), "添加"));
+    await h.fromOwner("每周活动");
+    const repeat = h.tg.last("sendMessage");
+    await h.press(OWNER, OWNER, 2, data(repeat, "每周"));
+    await h.press(OWNER, OWNER, 2, data(h.tg.last("editMessageText"), "下一步"));
+    expect(h.tg.last("answerCallbackQuery").text).toContain("至少选一天");
+    await h.press(OWNER, OWNER, 2, data(h.tg.last("editMessageText"), "周一"));
+    await h.press(OWNER, OWNER, 2, data(h.tg.last("editMessageText"), "周三"));
+    expect(buttons(h.tg.last("editMessageText")).find((button) => button.text.includes("周三"))?.text).toContain("✅");
+    await h.press(OWNER, OWNER, 2, data(h.tg.last("editMessageText"), "下一步"));
+    await h.fromOwner("明天");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("不是有效的时间");
+    await h.fromOwner("18:30 9:00");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("每周一、三 09:00、18:30");
+    expect(num((await row("SELECT run_at FROM schedules")).run_at)).toBe(at("2026-11-09T09:00:00"));
+    expect(h.tg.named("sendMessage").at(-1)?.reply_markup).toBeDefined();
+    await h.press(OWNER, OWNER, 1, "sch");
+    expect(String(h.tg.last("editMessageText").text)).toContain("每周活动");
+  });
+
+  it("菜单发图片建定时；同事点不了", async () => {
+    await h.press(OWNER, OWNER, 1, "sa");
+    await h.fromOwner(undefined as never, { photo: [{ file_id: "big", file_unique_id: "b", width: 9, height: 9 }], caption: "图文" });
+    await h.press(OWNER, OWNER, 2, data(h.tg.last("sendMessage"), "每天"));
+    await h.fromOwner("9:00");
+    expect((await row("SELECT photo_id FROM schedules")).photo_id).toBe("big");
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    h.tg.reset();
+    await h.press(7777, GROUP, 1, "sch");
+    expect(h.tg.last("answerCallbackQuery").text).toContain("只有主人");
+  });
+
+  it("没选完时间的草稿不会发送", async () => {
+    await createDraft(h.app.db, { text: "草稿" }, h.clock.now);
+    h.clock.now += 86_400;
+    await tick(h.app);
+    expect(h.tg.textsTo(ALICE)).toEqual([]);
+  });
+
+  it("菜单能分开改自动回复的文字和图片", async () => {
+    await h.press(OWNER, OWNER, 1, "m:welcome");
+    await h.press(OWNER, OWNER, 1, "mi:welcomePhoto");
+    await h.fromOwner("这是文字");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("这里要发图片");
+    await h.fromOwner(undefined as never, { photo: [{ file_id: "w", file_unique_id: "w", width: 9, height: 9 }] });
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    await h.fromOwner("新文字");
+    await h.fromUser(7003, "/start");
+    expect(h.tg.last("sendPhoto")).toMatchObject({ chat_id: 7003, photo: "w", caption: "新文字" });
   });
 });
 

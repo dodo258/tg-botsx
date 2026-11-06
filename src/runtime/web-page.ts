@@ -16,7 +16,7 @@ export const PAGE = `<!doctype html>
 --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","HarmonyOS Sans SC","Segoe UI Variable","Microsoft YaHei UI","Noto Sans CJK SC",system-ui,sans-serif;
 --serif:"Songti SC","Noto Serif CJK SC","Source Han Serif SC","STSong",ui-serif,serif;
 --ease:cubic-bezier(.22,.8,.24,1)}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}[hidden]{display:none!important}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--zinc);color:var(--ink);font:14.5px/1.6 var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 button,input,textarea{font:inherit;color:inherit}
 a{color:inherit}
@@ -123,6 +123,16 @@ dialog.sheet::backdrop{background:rgba(20,32,42,.22);animation:fade .2s}
 .pick{margin-top:10px}
 .pick img{display:block;max-width:100%;max-height:180px;margin-bottom:10px;border-radius:var(--r-m);border:1px solid var(--edge)}
 .pick .hint{display:block;margin:0 0 8px}
+.sch{list-style:none;margin:12px 0 0;padding:0}
+.sch li{padding:12px 0;border-top:1px solid var(--rule)}
+.sch-t{display:flex;align-items:baseline;gap:10px;justify-content:space-between}
+.sch-t strong{font-weight:550}.sch-t span{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.sch p{color:var(--muted);font-size:13px;margin-top:3px;overflow-wrap:anywhere}.sch em{font-style:normal;color:var(--twine)}
+.days{display:flex;gap:6px}
+.days button{appearance:none;flex:1;min-height:36px;border:0;border-radius:var(--r-s);background:var(--well);box-shadow:var(--well-shadow);color:var(--muted);cursor:pointer}
+.days button[aria-pressed=true]{background:var(--primary);box-shadow:var(--primary-shadow);color:var(--on-primary);font-weight:600}
+.times{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+input[type=date],input[type=time]{width:100%;min-height:42px;padding:9px 12px;background:var(--well);border:1px solid var(--edge);border-radius:var(--r-m);box-shadow:var(--well-shadow)}
 .switch{display:flex;align-items:center;gap:12px;margin-top:20px;cursor:pointer;font-weight:500;font-size:13.5px}
 .switch span{flex:1}
 .switch small{display:block;font-weight:400;color:var(--muted);font-size:13px}
@@ -273,9 +283,10 @@ function showManage(b){
   const path='/api/bots/'+encodeURIComponent(b.name);
   const d=sheet(headOf(esc(title(b)),b.contacts+' 个联系人，收到 '+b.inbound+' 条消息')+
    (b.username?'<div class="send"><div>把它发给要用的人<strong>@'+esc(b.username)+'</strong></div><button class="btn" id="cp">复制</button></div>':'')+
-   '<div class="tabs" role="tablist"><button role="tab" data-t="owner" aria-selected="true">管理员</button><button role="tab" data-t="set" aria-selected="false">设置</button><button role="tab" data-t="more" aria-selected="false">更多</button></div>'+
+   '<div class="tabs" role="tablist"><button role="tab" data-t="owner" aria-selected="true">管理员</button><button role="tab" data-t="set" aria-selected="false">设置</button><button role="tab" data-t="sch" aria-selected="false">定时发送</button><button role="tab" data-t="more" aria-selected="false">更多</button></div>'+
    '<div data-p="owner"><div class="owner" id="cur"></div><form id="a"><label for="w">'+(b.bound?'换一个人':'指定谁来用')+'</label><input id="w" type="text" placeholder="@zhangsan" autocomplete="off"><p class="hint" id="wh"></p><div class="acts"><button class="btn primary" id="assign"></button></div></form><div id="lb"></div></div>'+
    '<div data-p="set" hidden><form id="s"><label for="welcome">第一次的自动回复</label><p class="hint" style="margin:0 0 8px">陌生人第一次私信机器人时发一次。可以带一张图片。</p><textarea id="welcome" placeholder="读取中…"></textarea><div class="pick"><img id="pv" alt="自动回复的图片" hidden><span id="pn" class="hint" hidden>已设置图片</span><div class="acts" style="margin-top:0"><button type="button" class="btn" id="pa">添加图片</button><button type="button" class="btn bare" id="pr" hidden>去掉图片</button></div><input id="pf" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><label class="switch"><span>人机验证<small>第一次发消息要答一道 10 以内的加减题</small></span><input id="v" type="checkbox" role="switch"></label><div class="acts"><button class="btn primary">保存设置</button></div></form></div>'+
+   '<div data-p="sch" hidden><p class="hint" id="schr" style="margin-top:16px"></p><ul class="sch" id="schl"></ul><form id="sf" class="section" style="margin-top:20px"><h4>添加定时发送</h4><label for="st">内容</label><textarea id="st" placeholder="要发的文字"></textarea><div class="pick"><img id="spv" alt="要发的图片" hidden><div class="acts" style="margin-top:0"><button type="button" class="btn" id="spa">添加图片</button><button type="button" class="btn bare" id="spr" hidden>去掉图片</button></div><input id="spf" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><label>多久发一次</label><div class="seg" id="srp"><button type="button" class="tab" data-r="once" aria-pressed="true">只发一次</button><button type="button" class="tab" data-r="daily" aria-pressed="false">每天</button><button type="button" class="tab" data-r="weekly" aria-pressed="false">每周</button></div><div id="swk" hidden><label>每周哪几天</label><div class="days" id="sdays"><button type="button" data-w="1" aria-pressed="false">一</button><button type="button" data-w="2" aria-pressed="false">二</button><button type="button" data-w="3" aria-pressed="false">三</button><button type="button" data-w="4" aria-pressed="false">四</button><button type="button" data-w="5" aria-pressed="false">五</button><button type="button" data-w="6" aria-pressed="false">六</button><button type="button" data-w="0" aria-pressed="false">日</button></div></div><div id="sdw"><label for="sd">日期</label><input id="sd" type="date"></div><label>时间</label><div id="stms" class="times"><input type="time" value="09:00" required aria-label="时间"></div><button type="button" class="btn bare" id="stadd" hidden style="margin-top:6px">再加一个时间</button><div class="acts"><button class="btn primary">添加</button></div></form></div>'+
    '<div data-p="more" hidden>'+(b.canDelete?'<form id="k" class="section" style="margin-top:18px"><h4>换 Token</h4><p class="hint">在 @BotFather 重置过 Token，或者这个机器人连不上时用。</p><input id="tk" type="password" placeholder="新的 Token" autocomplete="off" style="margin-top:10px"><div class="acts"><button class="btn">换 Token</button></div></form><div class="section"><h4>删除机器人</h4><p class="hint">它的聊天记录会一起删掉，不能恢复。要删的话，输入 <strong>'+esc(b.name)+'</strong> 确认。</p><input id="dn" type="text" autocomplete="off" style="margin-top:10px"><div class="acts"><button type="button" class="btn danger" id="del" disabled>删除机器人</button></div></div>':'<p class="hint" style="margin-top:18px">这是安装时的默认机器人，它的 Token 和卸载都在服务器上用 tgbot 命令操作。</p>')+'</div>'+
    '<p class="err" hidden></p><p class="note" hidden></p>');
   const paint=()=>{
@@ -297,6 +308,22 @@ function showManage(b){
   pa.onclick=()=>pf.click();
   pr.onclick=()=>{newImage='';dropImage=true;pf.value='';showImage('',false)};
   pf.onchange=()=>{const f=pf.files[0];if(!f)return;if(f.size>5242880){fail(d,new Error('图片太大了，请控制在 5 MB 以内。'));pf.value='';return}const r=new FileReader();r.onload=()=>{newImage=r.result;dropImage=false;showImage(newImage,true)};r.readAsDataURL(f)};
+  // 定时发送
+  let schImage='',schRepeat='once';
+  const paintSch=async()=>{const r=await call(path+'/schedules');d.querySelector('#schr').textContent='到点发给所有联系人，现在有 '+r.recipients+' 个。已屏蔽和拉黑机器人的不发。时区 '+r.timezone+'。';
+    const l=d.querySelector('#schl');l.innerHTML=r.schedules.map(x=>'<li><div class="sch-t"><strong>'+esc(x.when)+'</strong><span>'+esc(x.state)+'</span></div><p>'+(x.hasImage?'<em>图片</em> ':'')+esc(x.text.slice(0,80))+'</p><div class="acts" style="margin-top:8px">'+(x.canToggle?'<button type="button" class="btn" data-st="'+x.id+'">'+(x.enabled?'暂停':'恢复')+'</button>':'')+'<button type="button" class="btn bare" data-sd="'+x.id+'">删除</button></div></li>').join('');
+    l.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{try{await call(path+'/schedules/'+b.dataset.st+'/toggle','POST',{});await paintSch()}catch(e){fail(d,e)}});
+    l.querySelectorAll('[data-sd]').forEach(b=>{let sure=false;b.onclick=async()=>{if(!sure){sure=true;b.textContent='再点一次确认';return}try{await call(path+'/schedules/'+b.dataset.sd,'DELETE');await paintSch()}catch(e){fail(d,e)}}});
+  };
+  d.querySelector('[data-t=sch]').addEventListener('click',()=>{paintSch().catch(e=>fail(d,e))});
+  d.querySelectorAll('[data-r]').forEach(b=>b.onclick=()=>{schRepeat=b.dataset.r;d.querySelectorAll('[data-r]').forEach(x=>x.setAttribute('aria-pressed',x===b));d.querySelector('#sdw').hidden=schRepeat!=='once';d.querySelector('#swk').hidden=schRepeat!=='weekly';d.querySelector('#stadd').hidden=schRepeat==='once';if(schRepeat==='once')d.querySelectorAll('#stms input').forEach((x,i)=>{if(i)x.remove()})});
+  d.querySelectorAll('[data-w]').forEach(b=>b.onclick=()=>b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')!=='true'));
+  d.querySelector('#stadd').onclick=()=>{const i=document.createElement('input');i.type='time';i.required=true;i.setAttribute('aria-label','时间');d.querySelector('#stms').append(i);i.focus()};
+  const spv=d.querySelector('#spv'),spf=d.querySelector('#spf'),spr=d.querySelector('#spr'),spa=d.querySelector('#spa');
+  const showSch=()=>{spv.hidden=!schImage;if(schImage)spv.src=schImage;spr.hidden=!schImage;spa.textContent=schImage?'换一张':'添加图片'};
+  spa.onclick=()=>spf.click();spr.onclick=()=>{schImage='';spf.value='';showSch()};
+  spf.onchange=()=>{const f=spf.files[0];if(!f)return;if(f.size>5242880){fail(d,new Error('图片太大了，请控制在 5 MB 以内。'));spf.value='';return}const r=new FileReader();r.onload=()=>{schImage=r.result;showSch()};r.readAsDataURL(f)};
+  d.querySelector('#sf').onsubmit=async ev=>{ev.preventDefault();try{const c=await call(path+'/schedules','POST',{text:d.querySelector('#st').value,repeat:schRepeat,date:d.querySelector('#sd').value,weekdays:[...d.querySelectorAll('[data-w][aria-pressed=true]')].map(x=>Number(x.dataset.w)),times:[...d.querySelectorAll('#stms input')].map(x=>x.value),time:d.querySelector('#stms input').value,...(schImage?{image:schImage}:{})});d.querySelector('#st').value='';schImage='';spf.value='';showSch();await paintSch();ok(d,'已设好：'+c.when+'，'+c.state+'。')}catch(e){fail(d,e)}};
   let armed=false;
   d.querySelector('#a').onsubmit=async ev=>{ev.preventDefault();const w=d.querySelector('#w').value.trim(),btn=d.querySelector('#assign');
     if(b.bound&&!armed){armed=true;btn.textContent='再点一次确认：清除现在的管理员';return}

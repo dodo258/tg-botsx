@@ -75,6 +75,9 @@ export function startBot(spec: BotSpec): RunningBot {
     while (!stopping) {
       try {
         await migrate(db);
+        // 群发的租约是防同一进程里定时任务和立即执行撞车的。刚启动时不可能有人在发，
+        // 留着的是上次被杀时没释放的，不清掉要白等两分钟才接着发
+        await db.prepare("UPDATE broadcasts SET locked_until = NULL WHERE state = 'running'").run();
         const app = await buildApp();
         // 这个 Token 以前被别的程序设过 Webhook 的话要先删，否则长轮询会报 409
         await tg.call("deleteWebhook", { drop_pending_updates: false });

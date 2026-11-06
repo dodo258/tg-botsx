@@ -4,6 +4,7 @@ import { dayKey, getContact } from "./contacts.ts";
 import { num } from "./db.ts";
 import { noticeToOwner, copyToDesk } from "./desk.ts";
 import { toMessage } from "./messages.ts";
+import { scheduleTick, sendScheduled, getSchedule } from "./schedule.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
 
@@ -17,6 +18,12 @@ export async function broadcastTick(app: App): Promise<void> {
   const job = await app.db.prepare("SELECT * FROM broadcasts WHERE state = 'running' ORDER BY id LIMIT 1").first();
   if (!job) return;
   const id = num(job.id);
+  const scheduleId = typeof job.schedule_id === "number" ? job.schedule_id : null;
+  const schedule = scheduleId === null ? null : await getSchedule(app.db, scheduleId);
+  if (scheduleId !== null && !schedule) {
+    await app.db.prepare("UPDATE broadcasts SET state = 'cancelled', finished_at = ? WHERE id = ?").bind(app.now(), id).run();
+    return;
+  }
   // 租约：确认后的立即执行可能撞上定时任务，两边读到同一个游标就会重复发。抢不到就让对方干。
   const claimed = await app.db
     .prepare("UPDATE broadcasts SET locked_until = ? WHERE id = ? AND state = 'running' AND (locked_until IS NULL OR locked_until < ?)")
@@ -33,7 +40,10 @@ export async function broadcastTick(app: App): Promise<void> {
     .all<{ user_id: unknown }>();
   if (recipients.length === 0) {
     await app.db.prepare("UPDATE broadcasts SET state = 'done', finished_at = ?, locked_until = NULL WHERE id = ?").bind(app.now(), id).run();
-    await app.tg.call("sendMessage", { chat_id: num(job.report_chat_id), text: `群发完成：成功 ${num(fresh?.sent)}，失败 ${num(fresh?.failed)}。` });
+    // 定时发送可能每天都有，汇报不响铃。没有管理员时没地方汇报
+    if (num(job.report_chat_id) !== 0) {
+      await app.tg.call("sendMessage", { chat_id: num(job.report_chat_id), text: `${schedule ? "定时发送" : "群发"}完成：成功 ${num(fresh?.sent)}，失败 ${num(fresh?.failed)}。`, ...(schedule ? { disable_notification: true } : {}) });
+    }
     return;
   }
   let sent = 0;
@@ -43,7 +53,8 @@ export async function broadcastTick(app: App): Promise<void> {
     if (app.isStopping?.()) break;
     const userId = num(recipient.user_id);
     try {
-      await app.tg.call("copyMessage", { chat_id: userId, from_chat_id: fromChat, message_id: fromMsg });
+      if (schedule) await sendScheduled(app, schedule, userId);
+      else await app.tg.call("copyMessage", { chat_id: userId, from_chat_id: fromChat, message_id: fromMsg });
       sent++;
     } catch (error) {
       // 被限流、网络问题或服务器出错就停在这一个，下一轮从这里继续。这些人不是真的发不到
@@ -108,6 +119,9 @@ export async function dailyCleanup(app: App): Promise<void> {
     app.db.prepare("DELETE FROM held_messages WHERE held_at < ?").bind(now - 8 * 86_400),
     app.db.prepare("DELETE FROM album_buffer WHERE added_at < ?").bind(app.nowMs() - 3_600_000),
     app.db.prepare("DELETE FROM cards WHERE created_at < ?").bind(now - 400 * 86_400),
+    // 问到一半没设完的定时草稿，和它们传的图片
+    app.db.prepare("DELETE FROM assets WHERE name IN (SELECT 'schedule:' || id FROM schedules WHERE repeat_kind = 'draft' AND created_at < ?)").bind(now - 86_400),
+    app.db.prepare("DELETE FROM schedules WHERE repeat_kind = 'draft' AND created_at < ?").bind(now - 86_400),
   ];
   const days = app.settings.retentionDays;
   if (days > 0) {
@@ -119,7 +133,7 @@ export async function dailyCleanup(app: App): Promise<void> {
 }
 
 export async function tick(app: App): Promise<void> {
-  for (const job of [broadcastTick, retryFailed, reportGivenUp, dailyCleanup]) {
+  for (const job of [scheduleTick, broadcastTick, retryFailed, reportGivenUp, dailyCleanup]) {
     try {
       await job(app);
     } catch (error) {

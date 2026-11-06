@@ -19,9 +19,11 @@ import {
 import { getContact, identityHtml } from "./contacts.ts";
 import { num, str } from "./db.ts";
 import { backRow, CANCEL_KEYBOARD, clearAwaiting, currentAwaiting, handleAwaitingInput, renderMore, renderPanel, setAwaiting } from "./menus.ts";
-import { clipChars, clipHtml, escapeHtml, kindLabel } from "./message-info.ts";
+import { clipChars, clipHtml, escapeHtml, fitLines, kindLabel } from "./message-info.ts";
 import { findById, resolveDeskMessage, toMessage } from "./messages.ts";
 import { selectedUser, setSelected } from "./outbound.ts";
+import type { Schedule } from "./schedule.ts";
+import { activateSchedule, CAPTION_LIMIT, countRecipients, createDraft, deleteSchedule, describeRepeat, getSchedule, listSchedules, parseOnce, parseTimes, scheduleState, TEXT_LIMIT, toggleSchedule, WEEKDAYS } from "./schedule.ts";
 import { retract } from "./sync.ts";
 import { TelegramError } from "./telegram.ts";
 
@@ -78,8 +80,40 @@ function id(value: string | undefined): number | null {
 
 const quickById = (app: App, rowId: number) => app.db.prepare("SELECT name, body FROM quick_replies WHERE rowid = ?").bind(rowId).first<{ name: unknown; body: unknown }>();
 
+async function schedulePage(app: App): Promise<{ text: string; keyboard: unknown }> {
+  const schedules = await listSchedules(app.db);
+  const timezone = app.settings.timezone;
+  const count = await countRecipients(app.db, app.settings.ownerId);
+  const lines = schedules.map((item) => `<b>${escapeHtml(describeRepeat(item, timezone))}</b>（${escapeHtml(scheduleState(item, timezone))}）\n${item.photoId || item.hasAsset ? "[图片] " : ""}${clipHtml(item.text, 60)}`);
+  const buttons = schedules.slice(0, 12).map((item) => [{ text: clipChars(`${item.enabled ? "⏰" : "⏸"} ${describeRepeat(item, timezone)}`, 40), callback_data: `sv:${item.id}` }]);
+  return {
+    text: `<b>⏰ 定时发送</b>\n到点把内容发给所有联系人，现在有 ${count} 个。已屏蔽和拉黑机器人的不发。\n\n${lines.length ? fitLines(lines, "\n\n").text : "还没有。"}`,
+    keyboard: { inline_keyboard: [...buttons, [{ text: "➕ 添加", callback_data: "sa" }], backRow()] },
+  };
+}
+
+async function scheduleDetail(app: App, item: Schedule): Promise<string> {
+  const timezone = app.settings.timezone;
+  return `<b>${escapeHtml(describeRepeat(item, timezone))}</b>\n${escapeHtml(scheduleState(item, timezone))}\n\n${item.photoId || item.hasAsset ? "[图片]\n" : ""}${clipHtml(item.text, 2000)}`;
+}
+
+function weekdayKeyboard(scheduleId: number, days: number[]): unknown {
+  const buttons = [1, 2, 3, 4, 5, 6, 0].map((day) => ({ text: `${days.includes(day) ? "✅ " : ""}${WEEKDAYS[day] ?? ""}`, callback_data: `sw:${scheduleId}:${day}` }));
+  return { inline_keyboard: [buttons.slice(0, 4), buttons.slice(4), [{ text: "➡️ 下一步", callback_data: `swn:${scheduleId}` }, { text: "❌ 取消", callback_data: `sd:${scheduleId}` }]] };
+}
+
+function scheduleButtons(item: Schedule): unknown {
+  const canToggle = item.enabled || item.repeat !== "once" || item.lastRun === null;
+  return {
+    inline_keyboard: [
+      [...(canToggle ? [{ text: item.enabled ? "⏸ 暂停" : "▶️ 恢复", callback_data: `st:${item.id}` }] : []), { text: "🗑 删除", callback_data: `sd:${item.id}` }],
+      [{ text: "⬅️ 返回", callback_data: "sch" }],
+    ],
+  };
+}
+
 /** 只有主人能点的动作 */
-export const PANEL_OWNER_ACTIONS = new Set(["rl", "rv", "rd", "ra", "bc", "bcx", "ex", "cl"]);
+export const PANEL_OWNER_ACTIONS = new Set(["rl", "rv", "rd", "ra", "bc", "bcx", "ex", "cl", "sch", "sa", "sr", "sw", "swn", "sv", "st", "sd"]);
 export const PANEL_ACTIONS = new Set(["p", "fblock", "unsel", "qm", "qv", "qd", "qa", "qp", "qs", "bk", "ubl", "srch", "undo", "undo!", "cancel", ...PANEL_OWNER_ACTIONS]);
 
 export async function panelAction(ctx: Ctx, action: string, arg: string, extra: string | undefined): Promise<void> {
@@ -113,6 +147,57 @@ export async function panelAction(ctx: Ctx, action: string, arg: string, extra: 
       const userId = id(arg);
       if (userId !== null && (await selectedUser(app, query.from.id)) === userId) await setSelected(app, query.from.id, null);
       return await edit(ctx, "已取消选中。之后发的消息不会发给任何人，除非长按回复或重新选一个。", { inline_keyboard: [[{ text: "💬 最近会话", callback_data: "list:0" }], backRow()] });
+    }
+    // ---------- 定时发送 ----------
+    case "sch": {
+      const page = await schedulePage(app);
+      return await edit(ctx, page.text, page.keyboard);
+    }
+    case "sa":
+      return await ask(ctx, "p:schbody", "发来要定时发送的内容：一段文字，或者一张图片（图片的说明就是文字）。");
+    case "sr": {
+      const schedule = await getSchedule(app.db, id(arg) ?? 0);
+      if (!schedule) return await ctx.answer("这条已经没有了。", true);
+      if (extra === "weekly") return await edit(ctx, "每周哪几天发？可以选多天，选好点下一步。", weekdayKeyboard(schedule.id, []));
+      if (extra !== "once" && extra !== "daily") return;
+      await edit(ctx, extra === "daily" ? "每天发。" : "只发一次。");
+      return await ask(ctx, `p:schtime:${schedule.id}:${extra}`, extra === "daily" ? "每天几点发？可以写多个时间，用空格分开，比如 9:00 18:30。" : `什么时候发？写成 9:30、明天 9:30 或 11-7 9:30。时区是 ${app.settings.timezone}。`);
+    }
+    case "sw": {
+      const schedule = await getSchedule(app.db, id(arg) ?? 0);
+      const day = id(extra);
+      if (!schedule || day === null || day > 6) return await ctx.answer("这条已经没有了。", true);
+      const days = schedule.weekdays.includes(day) ? schedule.weekdays.filter((item) => item !== day) : [...schedule.weekdays, day];
+      await app.db.prepare("UPDATE schedules SET weekdays = ? WHERE id = ?").bind(days.join(","), schedule.id).run();
+      return await edit(ctx, "每周哪几天发？可以选多天，选好点下一步。", weekdayKeyboard(schedule.id, days));
+    }
+    case "swn": {
+      const schedule = await getSchedule(app.db, id(arg) ?? 0);
+      if (!schedule) return await ctx.answer("这条已经没有了。", true);
+      if (schedule.weekdays.length === 0) return await ctx.answer("至少选一天。", true);
+      await edit(ctx, `每周 ${schedule.weekdays.length} 天。`);
+      return await ask(ctx, `p:schtime:${schedule.id}:weekly`, "这几天几点发？可以写多个时间，用空格分开，比如 9:00 18:30。");
+    }
+    case "sv": {
+      const schedule = await getSchedule(app.db, id(arg) ?? 0);
+      if (!schedule) return await ctx.answer("这条已经没有了。", true);
+      return await edit(ctx, await scheduleDetail(app, schedule), scheduleButtons(schedule));
+    }
+    case "st": {
+      const schedule = await getSchedule(app.db, id(arg) ?? 0);
+      if (!schedule) return await ctx.answer("这条已经没有了。", true);
+      const failure = await toggleSchedule(app.db, schedule, app.settings.timezone, app.now());
+      if (failure) return await ctx.answer(failure, true);
+      const fresh = await getSchedule(app.db, schedule.id);
+      if (fresh) await edit(ctx, await scheduleDetail(app, fresh), scheduleButtons(fresh));
+      return;
+    }
+    case "sd": {
+      const scheduleId = id(arg);
+      if (scheduleId !== null) await deleteSchedule(app.db, scheduleId, app.now());
+      await ctx.answer("已删除");
+      const page = await schedulePage(app);
+      return await edit(ctx, page.text, page.keyboard);
     }
     case "cancel":
       // 等待状态在回调入口已经清掉了
@@ -266,8 +351,54 @@ export async function handleInput(app: App, message: Message, staffId: number): 
     await offerBroadcast(app, message, message.message_id);
     return true;
   }
+  if (awaiting === "p:schbody") {
+    const photo = message.photo?.at(-1)?.file_id ?? "";
+    const body = message.caption ?? text;
+    if (!photo && !body.trim()) {
+      await answer("这里要发文字或图片。", CANCEL_KEYBOARD);
+      return true;
+    }
+    const limit = photo ? CAPTION_LIMIT : TEXT_LIMIT;
+    if (body.length > limit) {
+      await answer(photo ? `图片的说明最多 ${CAPTION_LIMIT} 字（Telegram 的限制）。` : `太长了，请控制在 ${TEXT_LIMIT} 字以内。`, CANCEL_KEYBOARD);
+      return true;
+    }
+    const draft = await createDraft(app.db, { text: body, photoId: photo }, app.now());
+    await clearAwaiting(app, staffId, message.chat.id);
+    await answer("多久发一次？", { inline_keyboard: [[{ text: "1️⃣ 只发一次", callback_data: `sr:${draft}:once` }, { text: "📅 每天", callback_data: `sr:${draft}:daily` }, { text: "🗓 每周", callback_data: `sr:${draft}:weekly` }], [{ text: "❌ 取消", callback_data: `sd:${draft}` }]] });
+    return true;
+  }
   if (!text.trim()) {
     await answer("这里要发文字。", CANCEL_KEYBOARD);
+    return true;
+  }
+  if (awaiting.startsWith("p:schtime:")) {
+    const [, , rawId, rawKind] = awaiting.split(":");
+    const draft = await getSchedule(app.db, Number(rawId));
+    if (!draft) {
+      await clearAwaiting(app, staffId, message.chat.id);
+      await answer("这条已经没有了。");
+      return true;
+    }
+    if (rawKind === "daily" || rawKind === "weekly") {
+      const times = parseTimes(text);
+      if (typeof times === "string") {
+        await answer(times, CANCEL_KEYBOARD);
+        return true;
+      }
+      await activateSchedule(app.db, draft.id, { repeat: rawKind, times, weekdays: draft.weekdays }, app.settings.timezone, app.now());
+    } else {
+      const once = parseOnce(text, app.settings.timezone, app.now());
+      if (typeof once === "string") {
+        await answer(once, CANCEL_KEYBOARD);
+        return true;
+      }
+      await activateSchedule(app.db, draft.id, { repeat: "once", ...once }, app.settings.timezone, app.now());
+    }
+    await clearAwaiting(app, staffId, message.chat.id);
+    const saved = await getSchedule(app.db, Number(rawId));
+    const count = await countRecipients(app.db, app.settings.ownerId);
+    await answer(saved ? `已设好：${describeRepeat(saved, app.settings.timezone)}，${scheduleState(saved, app.settings.timezone)}。现在有 ${count} 个联系人会收到。` : "已设好。", { inline_keyboard: [[{ text: "⏰ 返回定时发送", callback_data: "sch" }]] });
     return true;
   }
   if (awaiting === "p:search") {

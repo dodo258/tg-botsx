@@ -149,7 +149,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
         await saveSetting(app.db, app.settings, "welcomePhotoId", "");
         await saveSetting(app.db, app.settings, "welcomeImage", false);
         await app.db.prepare("DELETE FROM assets WHERE name = 'welcome'").run();
-        const menu = renderMenu(app, "auto");
+        const menu = renderMenu(app, "welcome");
         await edit(ctx, menu.text, menu.keyboard);
         return true;
       }
