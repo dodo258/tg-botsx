@@ -1,10 +1,12 @@
-# 运行时没有第三方依赖：Node 自带 SQLite 和 TypeScript 类型剥离，镜像里只有源码。
+# 运行时没有第三方依赖：Node 自带 SQLite，也能把 TypeScript 转成 JavaScript，镜像里只有源码和转好的文件。
 FROM node:26-alpine
 WORKDIR /app
 COPY package.json ./
 COPY src ./src
+RUN node --disable-warning=ExperimentalWarning src/build.ts dist
 RUN mkdir -p /data && chown node:node /data
 ENV DATA_DIR=/data
 USER node
 VOLUME /data
-CMD ["node", "--disable-warning=ExperimentalWarning", "src/runtime/node.ts"]
+# 新生代调小：这个程序消息量不大，默认值白占内存。实测 10 个机器人省 20 多 MB，50 个省 50 MB 左右
+CMD ["node", "--max-semi-space-size=1", "--disable-warning=ExperimentalWarning", "dist/runtime/node.js"]

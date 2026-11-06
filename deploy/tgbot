@@ -13,7 +13,7 @@ die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || exec sudo -E "$0" "$@"
 [ -f "$DIR/docker-compose.yml" ] || die "在 $DIR 没找到安装。先运行安装脚本。"
 compose() { (cd "$DIR" && docker compose "$@"); }
-run_node() { compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts "$@"; }
+run_node() { compose exec -T bot node --disable-warning=ExperimentalWarning dist/runtime/node.js "$@"; }
 
 bot_running() {
   compose ps --status running --services 2>/dev/null | grep -qx bot

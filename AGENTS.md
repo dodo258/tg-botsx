@@ -4,7 +4,7 @@
 传声筒：中文 Telegram 私人双向机器人，个人或小团队自部署，没有中心服务。一个进程跑多个机器人，每个一份目录、Token 文件和数据库，数据互不相通。网页管理只给部署的人用，看不到聊天内容。贴一个 Token、在机器人里点一下按钮就能部署到自己的服务器，消息不丢、不串、能自愈。
 
 ## 技术栈与目录
-TypeScript + Node 自带的 SQLite，运行时零依赖（`@grammyjs/types` 只用类型）。Node 直接跑 `.ts`，不需要构建。
+TypeScript + Node 自带的 SQLite，运行时零依赖（`@grammyjs/types` 只用类型）。开发和测试时 Node 直接跑 `.ts`；Docker 镜像构建时用 `src/build.ts` 预先转成 `dist/`，省内存。
 - `src/core/` — 业务代码，只依赖 `App` 接口
 - `src/runtime/node.ts` — 程序入口：命令行，按磁盘上的 Token 文件启停机器人
 - `src/runtime/runner.ts` — 跑一个机器人（长轮询、定时任务）

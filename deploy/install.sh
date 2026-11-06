@@ -244,7 +244,7 @@ add_more_bots() {
   step "添加其他机器人"
   local token
   for token in $MORE_TOKENS; do
-    printf '%s\n' "$token" | (cd "$DIR" && docker compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts add) || say "这个 Token 没加上，看上面的原因。"
+    printf '%s\n' "$token" | (cd "$DIR" && docker compose exec -T bot node --disable-warning=ExperimentalWarning dist/runtime/node.js add) || say "这个 Token 没加上，看上面的原因。"
   done
   say "把机器人的用户名发给要用的人，对方私聊机器人，点「成为管理员」就好了。"
 }
@@ -285,7 +285,7 @@ show_claim() {
   local logs="" link="" state="" waited=0
   # 开网页时容器刚重建，要等它连上才查得到。不能把「还没连上」当成「已经绑定过」
   while [ "$waited" -lt 30 ]; do
-    state="$( (cd "$DIR" && docker compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts list </dev/null 2>/dev/null) | grep '^默认' | cut -f3 || true)"
+    state="$( (cd "$DIR" && docker compose exec -T bot node --disable-warning=ExperimentalWarning dist/runtime/node.js list </dev/null 2>/dev/null) | grep '^默认' | cut -f3 || true)"
     case "$state" in
       已绑定*)
         say "已经绑定过管理员了。要换人的话运行：$MANAGE claim"

@@ -283,8 +283,31 @@ async function testWeb(fake: FakeServer): Promise<void> {
   }
 }
 
+/** 镜像里跑的是转好的 JS，和开发时不是同一份文件，要单独确认能跑。 */
+async function testBuilt(fake: FakeServer): Promise<void> {
+  const out = mkdtempSync(join(tmpdir(), "tg-botsx-dist-"));
+  const dataDir = mkdtempSync(join(tmpdir(), "tg-botsx-built-"));
+  const build = start("node", ["--disable-warning=ExperimentalWarning", "src/build.ts", out], {}, []);
+  await waitFor("转换", () => build.exitCode !== null);
+  check("转换成功", build.exitCode === 0);
+  const log: string[] = [];
+  const node = start("node", ["--max-semi-space-size=1", join(out, "runtime/node.js")], { BOT_TOKEN: TOKEN, DATA_DIR: dataDir, TELEGRAM_API_BASE: fake.url, NODE_NO_WARNINGS: "1" }, log);
+  try {
+    check("转好的 JS 能启动并连上", await waitFor("连接", () => log.join("").includes("已连接")), log.join(""));
+    const code = /claim_([\w-]+)/.exec(log.join(""))?.[1];
+    await waitFor("链接", () => /claim_/.test(log.join("")));
+    fake.queue.push(textUpdate(OWNER, `/start claim_${code ?? /claim_([\w-]+)/.exec(log.join(""))?.[1] ?? ""}`, 31));
+    check("转好的 JS 能处理消息", await waitFor("绑定", () => fake.named("sendMessage").some((m) => String(m.text).includes("绑定成功"))));
+  } finally {
+    node.kill("SIGKILL");
+    rmSync(out, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
 const fake = await startFakeTelegram(TOKEN);
 await testNode(fake);
+await testBuilt(fake);
 await testWeb(fake);
 await fake.close();
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
