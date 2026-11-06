@@ -8,30 +8,13 @@ const CLAIM_TTL = 10 * 60;
 
 const USER_COMMANDS = [{ command: "start", description: "开始" }];
 
+// 菜单里只放入口，其他操作都在面板里点按钮。完整命令照样能打，见 /help
 const STAFF_COMMANDS = [
-  { command: "list", description: "最近会话" },
-  { command: "search", description: "搜索联系人" },
-  { command: "history", description: "聊天记录" },
-  { command: "note", description: "给联系人加备注" },
-  { command: "q", description: "快捷回复" },
-  { command: "del", description: "撤回（回复自己发的消息）" },
-  { command: "block", description: "屏蔽联系人" },
-  { command: "unblock", description: "解除屏蔽" },
-  { command: "filtered", description: "隔离区" },
-  { command: "stats", description: "统计" },
-  { command: "help", description: "帮助" },
+  { command: "menu", description: "打开管理面板" },
+  { command: "help", description: "怎么回复消息" },
 ];
 
-const OWNER_COMMANDS = [
-  ...STAFF_COMMANDS.slice(0, -1),
-  { command: "settings", description: "设置" },
-  { command: "rule", description: "关键词自动回复" },
-  { command: "broadcast", description: "群发（回复一条消息）" },
-  { command: "status", description: "运行状态" },
-  { command: "cleanup", description: "清理记录" },
-  { command: "export", description: "导出数据" },
-  { command: "help", description: "帮助" },
-];
+const OWNER_COMMANDS = STAFF_COMMANDS;
 
 export async function syncCommands(app: App): Promise<void> {
   await app.tg.call("setMyCommands", { commands: USER_COMMANDS });
@@ -80,8 +63,7 @@ export async function tryClaim(app: App, message: Message): Promise<boolean> {
     text:
       "<b>绑定成功，你现在是这个机器人的管理员。</b>\n\n" +
       "别人发给机器人的消息会转到这里，<b>回复那条消息</b>就是回复对方，对方看不到你的账号。\n\n" +
-      "现在用另一个账号给机器人发条消息试试。\n" +
-      "/settings 改欢迎语和验证方式，/help 看全部命令。",
+      "现在用另一个账号给机器人发条消息试试。下面是管理面板，所有操作点按钮就行。以后想打开它，点输入框旁边的菜单。",
   });
   if (previous !== null && previous !== message.from.id) {
     await app.tg.call("sendMessage", { chat_id: previous, text: "这个机器人的管理员已被更换。如果不是你操作的，请立刻去 @BotFather 重置 Token。" }).catch((error: unknown) => {

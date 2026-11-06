@@ -7,39 +7,17 @@ import { getContact, identityHtml } from "./contacts.ts";
 import { num } from "./db.ts";
 import { cardText, contactKeyboard, copyToDesk, usesThreads } from "./desk.ts";
 import { challengePending, releaseHeld, sendChallenge } from "./inbound.ts";
-import { INPUTS, renderMenu, setAwaiting, TOGGLES } from "./menus.ts";
+import { backRow, CANCEL_KEYBOARD, clearAwaiting, INPUTS, renderMenu, setAwaiting, TOGGLES } from "./menus.ts";
 import { findById, toMessage } from "./messages.ts";
 import type { StoredMessage } from "./messages.ts";
 import { selectedUser, setSelected } from "./outbound.ts";
+import type { Ctx } from "./panel.ts";
+import { edit, PANEL_ACTIONS, PANEL_OWNER_ACTIONS, panelAction } from "./panel.ts";
 import { renderFiltered, renderHistory, renderSessions } from "./commands.ts";
 import { broadcastTick } from "./maintenance.ts";
 import { fetchBot, syncCommands } from "./setup.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
-
-interface Ctx {
-  app: App;
-  query: CallbackQuery;
-  chatId: number;
-  messageId: number;
-  answer(text?: string, alert?: boolean): Promise<void>;
-}
-
-async function edit(ctx: Ctx, html: string, keyboard?: unknown): Promise<void> {
-  try {
-    await ctx.app.tg.call("editMessageText", {
-      chat_id: ctx.chatId,
-      message_id: ctx.messageId,
-      text: html,
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-      ...(keyboard === undefined ? {} : { reply_markup: keyboard }),
-    });
-  } catch (error) {
-    if (error instanceof TelegramError && error.notModified) return;
-    throw error;
-  }
-}
 
 async function deleteQuietly(ctx: Ctx): Promise<void> {
   try {
@@ -154,7 +132,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       const spec = INPUTS[arg];
       if (!spec) return false;
       await setAwaiting(app, ctx.query.from.id, arg);
-      await app.tg.call("sendMessage", { chat_id: ctx.chatId, text: `${spec.prompt}\n发 /cancel 取消。` });
+      await app.tg.call("sendMessage", { chat_id: ctx.chatId, text: spec.prompt, reply_markup: CANCEL_KEYBOARD });
       return true;
     }
     case "mc":
@@ -187,7 +165,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       const id = positiveInt(arg);
       if (id === null) return false;
       const changed = await app.db.prepare("UPDATE broadcasts SET state = 'running' WHERE id = ? AND state = 'draft'").bind(id).run();
-      await edit(ctx, changed ? "开始群发，每分钟发一批，完成后告诉你。\n/broadcast cancel 可取消。" : "这次群发已经处理过了。");
+      await edit(ctx, changed ? "开始群发，每分钟发一批，完成后告诉你。" : "这次群发已经处理过了。", changed ? { inline_keyboard: [[{ text: "取消群发", callback_data: "bcx" }]] } : undefined);
       if (changed) app.defer(() => broadcastTick(app), 0);
       return true;
     }
@@ -204,7 +182,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       const cutoff = days === 0 ? app.now() + 1 : app.now() - days * 86_400;
       const row = await app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE created_at < ? AND (text IS NOT NULL OR file_id IS NOT NULL)").bind(cutoff).first<{ n: unknown }>();
       await edit(ctx, `会抹掉${days === 0 ? "全部" : ` ${days} 天前的`} ${num(row?.n)} 条记录的内容，不能恢复。\n联系人和回复关系保留。`, {
-        inline_keyboard: [[{ text: `确认清理 ${num(row?.n)} 条`, callback_data: `clean!:${days}` }, { text: "取消", callback_data: "dismiss" }]],
+        inline_keyboard: [[{ text: `确认清理 ${num(row?.n)} 条`, callback_data: `clean!:${days}` }, { text: "取消", callback_data: "cl" }]],
       });
       return true;
     }
@@ -213,7 +191,7 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       if (days === null) return false;
       const cutoff = days === 0 ? app.now() + 1 : app.now() - days * 86_400;
       const changed = await app.db.prepare("UPDATE messages SET text = NULL, file_id = NULL WHERE created_at < ? AND (text IS NOT NULL OR file_id IS NOT NULL)").bind(cutoff).run();
-      await edit(ctx, `已清理 ${changed} 条。`);
+      await edit(ctx, `已清理 ${changed} 条。`, { inline_keyboard: [backRow()] });
       return true;
     }
     default:
@@ -283,7 +261,8 @@ async function staffAction(ctx: Ctx, action: string, arg: string, extra: string 
         chat_id: ctx.chatId,
         ...(query.message?.message_thread_id === undefined ? {} : { message_thread_id: query.message.message_thread_id }),
         parse_mode: "HTML",
-        text: `给 ${identityHtml(contact)} 写备注，发 0 清空，发 /cancel 取消。`,
+        text: `给 ${identityHtml(contact)} 写备注，发 0 清空。`,
+        reply_markup: CANCEL_KEYBOARD,
       });
       return;
     case "block":
@@ -342,7 +321,12 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
   const fromOwnerDm = message.chat.id === app.settings.ownerId && isOwner(app, query.from.id);
   const fromGroup = app.settings.deskMode === "group" && message.chat.id === app.settings.groupId;
   if (!fromOwnerDm && !fromGroup) return await answer();
-  if (OWNER_ACTIONS.has(action)) {
+  // 点了别的按钮就是不想继续输入了，否则接下来发的话会被当成输入，发不到客户那里
+  await clearAwaiting(app, query.from.id);
+  if (PANEL_ACTIONS.has(action)) {
+    if (PANEL_OWNER_ACTIONS.has(action) && !isOwner(app, query.from.id)) return await answer("只有主人能操作。", true);
+    await panelAction(ctx, action, arg, extra);
+  } else if (OWNER_ACTIONS.has(action)) {
     if (!isOwner(app, query.from.id)) return await answer("只有主人能操作。", true);
     if (!(await ownerAction(ctx, action, arg, extra))) app.log("warn", "收到无法识别的主人操作", action);
   } else {

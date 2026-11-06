@@ -820,3 +820,248 @@ describe("管理功能", () => {
     expect(h.tg.named("copyMessage").length).toBeGreaterThan(0);
   });
 });
+
+describe("管理面板：不打命令也能管理", () => {
+  type Row = { text: string; callback_data?: string; url?: string }[];
+  const buttons = (params: Record<string, unknown>): Row[number][] => ((params.reply_markup as { inline_keyboard: Row[] } | undefined)?.inline_keyboard ?? []).flat();
+  const labels = (params: Record<string, unknown>) => buttons(params).map((button) => button.text);
+  const dataOf = (params: Record<string, unknown>, text: string) => {
+    const found = buttons(params).find((button) => button.text.includes(text))?.callback_data;
+    if (!found) throw new Error(`没有按钮「${text}」，实际：${labels(params).join("、")}`);
+    return found;
+  };
+
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+  });
+
+  it("主人发 /start 看到面板，能点到全部管理功能", async () => {
+    await h.fromOwner("/start");
+    const shown = labels(h.tg.last("sendMessage"));
+    for (const name of ["最近会话", "搜索联系人", "隔离区", "已屏蔽", "快捷回复", "统计", "关键词回复", "群发", "设置", "运行状态", "清理记录", "导出数据"]) {
+      expect(shown.join("、")).toContain(name);
+    }
+    for (const button of buttons(h.tg.last("sendMessage"))) expect(new TextEncoder().encode(button.callback_data ?? "").length).toBeLessThanOrEqual(64);
+  });
+
+  it("陌生人发 /start 看不到面板，按面板按钮也没有反应", async () => {
+    await h.fromUser(ALICE, "/start");
+    expect(h.tg.textsTo(ALICE).join()).not.toContain("管理面板");
+    h.tg.reset();
+    await h.press(ALICE, ALICE, 1, "ex");
+    await h.press(ALICE, ALICE, 1, "qm:0");
+    expect(h.tg.named("editMessageText")).toHaveLength(0);
+    expect(h.tg.calls.filter((call) => call.method === "sendDocument")).toHaveLength(0);
+  });
+
+  it("认领成功后直接给面板", async () => {
+    h = await makeHarness({ verify: false, owner: false });
+    await h.set("claimCode", "abc");
+    await h.set("claimExpiresAt", h.clock.now + 100);
+    await h.fromUser(OWNER, "/start claim_abc");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("管理面板");
+  });
+
+  it("命令菜单只留入口，打完整命令还能用", async () => {
+    h = await makeHarness({ verify: false, owner: false });
+    await h.set("claimCode", "abc");
+    await h.set("claimExpiresAt", h.clock.now + 100);
+    await h.fromUser(OWNER, "/start claim_abc");
+    const owner = h.tg.named("setMyCommands").find((params) => params.scope !== undefined);
+    expect((owner?.commands as { command: string }[]).map((item) => item.command)).toEqual(["menu", "help"]);
+    await h.fromOwner("/stats");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("今天");
+  });
+
+  it("点按钮添加快捷回复，点联系人卡片发出去，再点按钮删除", async () => {
+    await h.fromUser(ALICE, "你好");
+    await h.press(OWNER, OWNER, 1, "qa");
+    await h.fromOwner("价格");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("价格");
+    await h.fromOwner("99 元一个月 <b>");
+    expect((await row("SELECT body FROM quick_replies WHERE name = '价格'")).body).toBe("99 元一个月 <b>");
+
+    await h.press(OWNER, OWNER, 1, `qp:${ALICE}`);
+    const picker = h.tg.last("sendMessage");
+    h.tg.reset();
+    await h.press(OWNER, OWNER, 9, dataOf(picker, "价格"));
+    expect(h.tg.textsTo(ALICE)).toEqual(["99 元一个月 <b>"]);
+    expect(num((await row("SELECT COUNT(*) AS n FROM messages WHERE direction = 'out' AND user_id = ?", ALICE)).n)).toBe(1);
+    expect(String(h.tg.last("editMessageText").text)).toContain("已发给");
+
+    await h.press(OWNER, OWNER, 1, "qm:0");
+    const view = dataOf(h.tg.last("editMessageText"), "价格");
+    await h.press(OWNER, OWNER, 1, view);
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("editMessageText"), "删除"));
+    expect(num((await row("SELECT COUNT(*) AS n FROM quick_replies")).n)).toBe(0);
+  });
+
+  it("还没有快捷回复时，卡片上的按钮引导去添加", async () => {
+    await h.fromUser(ALICE, "你好");
+    await h.press(OWNER, OWNER, 1, `qp:${ALICE}`);
+    expect(labels(h.tg.last("sendMessage"))).toEqual(["添加快捷回复"]);
+  });
+
+  it("点按钮添加关键词回复，立刻生效，也能点按钮删除", async () => {
+    await h.press(OWNER, OWNER, 1, "ra");
+    await h.fromOwner("价格,多少钱");
+    await h.fromOwner("价格表：99 元");
+    await h.fromUser(ALICE, "这个多少钱");
+    expect(h.tg.textsTo(ALICE)).toContain("价格表：99 元");
+    await h.press(OWNER, OWNER, 1, "rl:0");
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("editMessageText"), "价格"));
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("editMessageText"), "删除"));
+    expect(num((await row("SELECT COUNT(*) AS n FROM auto_rules")).n)).toBe(0);
+  });
+
+  it("点按钮群发：发图片也行，确认前不会发出去", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, "bc");
+    h.tg.reset();
+    await h.fromOwner(undefined as never, { photo: [{ file_id: "p", file_unique_id: "u", width: 1, height: 1 }] });
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("1 个联系人");
+    expect((await row("SELECT state FROM broadcasts")).state).toBe("draft");
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("sendMessage"), "确认"));
+    await h.deferred.run();
+    expect(h.tg.named("copyMessage").filter((params) => params.chat_id === ALICE).length + h.tg.named("copyMessages").filter((params) => params.chat_id === ALICE).length).toBe(1);
+  });
+
+  it("点按钮搜索联系人", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, "srch");
+    h.tg.reset();
+    await h.fromOwner("u2001");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("用户2001");
+    expect(h.tg.named("copyMessage")).toHaveLength(0);
+    await h.press(OWNER, OWNER, 1, "srch");
+    await h.fromOwner("没有这个人");
+    expect(h.tg.textsTo(OWNER).at(-1)).toBe("没找到。");
+  });
+
+  it("已屏蔽列表能点按钮解除", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, `block:${ALICE}`);
+    await h.press(OWNER, OWNER, 1, "bk:0");
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("editMessageText"), "解除屏蔽"));
+    expect((await row("SELECT blocked_at FROM contacts WHERE user_id = ?", ALICE)).blocked_at).toBeNull();
+    expect(String(h.tg.last("editMessageText").text)).toContain("没有屏蔽");
+  });
+
+  it("卡片上能撤回发出去的最后一条，先确认", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.fromOwner("发错了");
+    h.tg.reset();
+    await h.press(OWNER, OWNER, 1, `undo:${ALICE}`);
+    expect(h.tg.named("deleteMessage")).toHaveLength(0);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("发错了");
+    await h.press(OWNER, OWNER, 9, dataOf(h.tg.last("sendMessage"), "确认撤回"));
+    expect(h.tg.last("deleteMessage").chat_id).toBe(ALICE);
+    expect(String(h.tg.last("editMessageText").text)).toContain("已撤回");
+    await h.press(OWNER, OWNER, 1, `undo:${ALICE}`);
+    expect(h.tg.last("answerCallbackQuery").text).toContain("没有可以撤回");
+  });
+
+  it("取消按钮：之后发的话照常发给客户，不会被当成输入", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    expect(labels(h.tg.last("sendMessage"))).toEqual(["取消"]);
+    await h.press(OWNER, OWNER, 9, "cancel");
+    expect(String(h.tg.last("editMessageText").text)).toBe("已取消。");
+    h.tg.reset();
+    await h.fromOwner("给客户的话");
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === ALICE)).toBe(true);
+    await h.fromUser(BOB, "/start");
+    expect(h.tg.textsTo(BOB).at(-1)).not.toBe("给客户的话");
+  });
+
+  it("点了提问又去点别的按钮，等于放弃这一步", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    await h.press(OWNER, OWNER, 1, "p:main");
+    h.tg.reset();
+    await h.fromOwner("给客户的话");
+    expect(h.tg.named("copyMessage").some((params) => params.chat_id === ALICE)).toBe(true);
+    await h.fromUser(BOB, "/start");
+    expect(h.tg.textsTo(BOB).at(-1)).not.toBe("给客户的话");
+  });
+
+  it("点了提问又打了命令，也等于放弃这一步", async () => {
+    await h.press(OWNER, OWNER, 1, "qa");
+    await h.fromOwner("/stats");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("今天");
+    await h.fromOwner("随便一句");
+    expect(num((await row("SELECT COUNT(*) AS n FROM staff_state WHERE awaiting IS NOT NULL")).n)).toBe(0);
+  });
+
+  it("每个页面都能回到面板", async () => {
+    for (const data of ["list:0", "filtered:0", "bk:0", "qm:0", "rl:0", "p:stats", "p:status", "p:help", "cl"]) {
+      await h.press(OWNER, OWNER, 1, data);
+      expect(buttons(h.tg.last("editMessageText")).some((button) => button.callback_data === "p:main"), data).toBe(true);
+    }
+    await h.press(OWNER, OWNER, 1, "m:main");
+    expect(buttons(h.tg.last("editMessageText")).some((button) => button.callback_data === "p:main")).toBe(true);
+  });
+
+  it("点清理记录走确认，导出发给主人", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.press(OWNER, OWNER, 1, "cl");
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("editMessageText"), "全部"));
+    expect(String(h.tg.last("editMessageText").text)).toContain("不能恢复");
+    await h.press(OWNER, OWNER, 1, dataOf(h.tg.last("editMessageText"), "确认清理"));
+    expect(String(h.tg.last("editMessageText").text)).toContain("已清理");
+    await h.press(OWNER, OWNER, 1, "ex");
+    expect(h.tg.last("sendDocument").chat_id).toBe(OWNER);
+  });
+
+  it("设置里的绑定话题群是一个拉群链接", async () => {
+    await h.set("botUsername", "demo_bot");
+    await h.press(OWNER, OWNER, 1, "m:desk");
+    const link = buttons(h.tg.last("editMessageText")).find((button) => button.url)?.url;
+    expect(link).toBe("https://t.me/demo_bot?startgroup=bind&admin=manage_topics");
+  });
+
+  it("通过拉群链接进群后，/start bind 会走绑定检查；别的群里的普通 /start 不理", async () => {
+    await h.set("botUsername", "demo_bot");
+    h.tg.responses.set("getChat", { is_forum: true });
+    h.tg.responses.set("getChatMember", { status: "administrator", can_manage_topics: true });
+    await h.fromGroup(7777, "/start@demo_bot", null);
+    expect(h.tg.named("getChat")).toHaveLength(0);
+    await h.fromGroup(OWNER, "/start@demo_bot bind", null);
+    expect(h.app.settings.deskMode).toBe("group");
+    expect(h.app.settings.groupId).toBe(GROUP);
+  });
+
+  describe("话题群里的同事", () => {
+    beforeEach(async () => {
+      await h.set("deskMode", "group");
+      await h.set("groupId", GROUP);
+    });
+
+    it("面板里没有主人专属的按钮，硬点也被拒绝", async () => {
+      await h.fromGroup(7777, "/menu", null);
+      const shown = labels(h.tg.last("sendMessage")).join("、");
+      expect(shown).toContain("快捷回复");
+      for (const name of ["群发", "设置", "导出数据", "清理记录", "运行状态", "关键词回复"]) expect(shown).not.toContain(name);
+      h.tg.reset();
+      for (const data of ["ex", "bc", "bcx", "cl", "rl:0", "ra", "rd:1", "p:status"]) {
+        await h.press(7777, GROUP, 1, data);
+      }
+      expect(h.tg.named("sendDocument")).toHaveLength(0);
+      expect(h.tg.named("sendMessage")).toHaveLength(0);
+      expect(h.tg.named("editMessageText")).toHaveLength(0);
+    });
+
+    it("提问发到当前话题，回答也在话题里", async () => {
+      await h.press(7777, GROUP, 1, "qa", 55);
+      expect(h.tg.last("sendMessage").message_thread_id).toBe(55);
+      await h.fromGroup(7777, "你好", 55);
+      await h.fromGroup(7777, "你好呀", 55);
+      expect((await row("SELECT body FROM quick_replies WHERE name = '你好'")).body).toBe("你好呀");
+      expect(h.tg.last("sendMessage").message_thread_id).toBe(55);
+    });
+  });
+});

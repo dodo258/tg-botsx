@@ -25,6 +25,7 @@ TypeScript + Node 自带的 SQLite，运行时零依赖（`@grammyjs/types` 只�
 - `handleUpdate` 不能向外抛异常，一条坏更新不能影响后面的消息。送不到的消息标 `failed` 由定时任务补发。
 - 日志和错误信息不能带 Token。`telegram.ts` 的错误里不放 URL。
 - 用户侧和管理员侧文字都用中文，写具体动作和原因，不写「操作失败」这种话。
+- 管理员不一定会打命令：新的管理功能要能从 `/menu` 面板点按钮完成（`menus.ts` 画页面，`panel.ts` 处理按钮和分步输入），命令只是给习惯打字的人的另一条路。
 - 只能用可擦除的 TS 语法（`erasableSyntaxOnly`），不能用 enum 和参数属性：Node 直接跑源码。
 
 ## 进度与决定

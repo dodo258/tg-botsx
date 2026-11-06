@@ -7,8 +7,9 @@ import { cmdBindGroup, handleCommand, isOtherBotCommand, parseCommand } from "./
 import { noticeToOwner } from "./desk.ts";
 import { handleContactMessage } from "./inbound.ts";
 import { isServiceMessage } from "./message-info.ts";
-import { handleAwaitingInput } from "./menus.ts";
+import { renderPanel } from "./menus.ts";
 import { handleStaffMessage } from "./outbound.ts";
+import { handleInput } from "./panel.ts";
 import { saveSetting } from "./settings.ts";
 import { tryClaim } from "./setup.ts";
 import { handleContactEdit, handleReaction, handleStaffEdit } from "./sync.ts";
@@ -25,7 +26,7 @@ async function staffPipeline(app: App, message: Message, staffId: number): Promi
   const command = parseCommand(message.text, app.settings.botUsername);
   // 双斜杠是内部备注，不算命令
   const isSlash = message.text?.startsWith("/") === true && !message.text.startsWith("//");
-  if (await handleAwaitingInput(app, message, staffId)) return;
+  if (await handleInput(app, message, staffId)) return;
   if (command) {
     const known = await handleCommand(app, message, staffId, command.name, command.args);
     if (!known) {
@@ -59,13 +60,19 @@ async function routeMessage(app: App, message: Message): Promise<void> {
   if (chat.type === "private") {
     const user = message.from;
     if (!user || user.is_bot) return;
-    if (await tryClaim(app, message)) return;
+    if (await tryClaim(app, message)) {
+      if (isOwner(app, user.id)) {
+        const panel = await renderPanel(app, true);
+        await app.tg.call("sendMessage", { chat_id: chat.id, text: panel.text, parse_mode: "HTML", reply_markup: panel.keyboard });
+      }
+      return;
+    }
     if (!isOwner(app, user.id)) {
       await handleContactMessage(app, message, user);
       return;
     }
     const isCommand = parseCommand(message.text, app.settings.botUsername) !== null;
-    if (app.settings.deskMode === "group" && !isCommand && !(await handleAwaitingInput(app, message, user.id))) {
+    if (app.settings.deskMode === "group" && !isCommand && !(await handleInput(app, message, user.id))) {
       await app.tg.call("sendMessage", { chat_id: chat.id, text: "现在是话题群模式，请到群里对应的话题回复。这条没有发给任何人。" });
       return;
     }
@@ -81,7 +88,9 @@ async function routeMessage(app: App, message: Message): Promise<void> {
     await staffPipeline(app, message, staffId);
     return;
   }
-  if (parseCommand(message.text, app.settings.botUsername)?.name === "bindgroup") await cmdBindGroup(app, message);
+  // 点「绑定话题群」按钮把机器人拉进群后，Telegram 会在群里发 /start bind
+  const command = parseCommand(message.text, app.settings.botUsername);
+  if (command?.name === "bindgroup" || (command?.name === "start" && command.args === "bind")) await cmdBindGroup(app, message);
 }
 
 async function routeEdited(app: App, message: Message): Promise<void> {
