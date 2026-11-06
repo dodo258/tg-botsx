@@ -66,7 +66,8 @@ async function buildApp(): Promise<App> {
 
 async function printClaim(app: App, username: string): Promise<void> {
   const code = await createClaim(app);
-  console.log(`\n用要当管理员的账号打开这个链接并点开始（10 分钟内有效）：\n${claimLink(username, code)}\n`);
+  const first = app.settings.ownerId === null;
+  console.log(`\n${first ? `用要当管理员的账号打开 @${username}，点开始，再点「成为管理员」（10 分钟内有效）。也可以直接打开这个链接：` : "用新管理员的账号打开这个链接并点开始（10 分钟内有效）："}\n${claimLink(username, code)}\n`);
 }
 
 const command = process.argv[2];

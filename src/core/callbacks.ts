@@ -15,7 +15,7 @@ import type { Ctx } from "./panel.ts";
 import { edit, PANEL_ACTIONS, PANEL_OWNER_ACTIONS, panelAction } from "./panel.ts";
 import { renderFiltered, renderHistory, renderSessions } from "./commands.ts";
 import { broadcastTick } from "./maintenance.ts";
-import { fetchBot, syncCommands } from "./setup.ts";
+import { claimByButton, fetchBot, syncCommands } from "./setup.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
 
@@ -313,6 +313,16 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
         await deleteQuietly(ctx);
         await sendChallenge(app, contact);
       }
+    }
+    return await answer();
+  }
+
+  if (action === "claim") {
+    if (message.chat.type !== "private") return await answer();
+    if (!(await claimByButton(app, query.from, message.chat.id))) {
+      await edit(ctx, "这个按钮已经失效：机器人已有管理员，或超过了 10 分钟。部署的人可以在服务器上运行 tgbot claim 重新生成。");
+    } else {
+      await deleteQuietly(ctx);
     }
     return await answer();
   }

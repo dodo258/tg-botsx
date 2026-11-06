@@ -7,11 +7,10 @@ import { cmdBindGroup, handleCommand, isOtherBotCommand, parseCommand } from "./
 import { noticeToOwner } from "./desk.ts";
 import { handleContactMessage } from "./inbound.ts";
 import { isServiceMessage } from "./message-info.ts";
-import { renderPanel } from "./menus.ts";
 import { handleStaffMessage } from "./outbound.ts";
 import { handleInput } from "./panel.ts";
 import { saveSetting } from "./settings.ts";
-import { tryClaim } from "./setup.ts";
+import { firstClaimOpen, sendClaimPrompt, tryClaim } from "./setup.ts";
 import { handleContactEdit, handleReaction, handleStaffEdit } from "./sync.ts";
 
 function staffIdOf(message: Message): number | null {
@@ -60,11 +59,9 @@ async function routeMessage(app: App, message: Message): Promise<void> {
   if (chat.type === "private") {
     const user = message.from;
     if (!user || user.is_bot) return;
-    if (await tryClaim(app, message)) {
-      if (isOwner(app, user.id)) {
-        const panel = await renderPanel(app, true);
-        await app.tg.call("sendMessage", { chat_id: chat.id, text: panel.text, parse_mode: "HTML", reply_markup: panel.keyboard });
-      }
+    if (await tryClaim(app, message)) return;
+    if (firstClaimOpen(app)) {
+      await sendClaimPrompt(app, chat.id);
       return;
     }
     if (!isOwner(app, user.id)) {

@@ -1072,4 +1072,78 @@ describe("管理面板：不打命令也能管理", () => {
       expect(h.tg.last("sendMessage").message_thread_id).toBe(55);
     });
   });
+
+  describe("首次绑定：点按钮成为管理员", () => {
+    beforeEach(async () => {
+      h = await makeHarness({ verify: false, owner: false });
+      await h.set("claimExpiresAt", h.clock.now + 600);
+      await h.set("claimCode", "abc");
+    });
+
+    it("打开机器人就有按钮，点一下成为管理员并收到面板，窗口关闭", async () => {
+      await h.fromUser(OWNER, "/start");
+      expect(labels(h.tg.last("sendMessage"))).toEqual(["👑 成为管理员"]);
+      await h.press(OWNER, OWNER, 9, "claim");
+      expect(h.app.settings.ownerId).toBe(OWNER);
+      expect(h.app.settings.claimExpiresAt).toBe(0);
+      expect(h.tg.textsTo(OWNER).join()).toContain("绑定成功");
+      expect(h.tg.textsTo(OWNER).at(-1)).toContain("管理面板");
+      expect(num((await row("SELECT COUNT(*) AS n FROM contacts")).n)).toBe(0);
+    });
+
+    it("第二个人点不到：别人抢不走已经绑定的机器人", async () => {
+      await h.fromUser(OWNER, "/start");
+      await h.press(OWNER, OWNER, 9, "claim");
+      await h.press(ALICE, ALICE, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(OWNER);
+      expect(String(h.tg.last("editMessageText").text)).toContain("失效");
+      h.tg.reset();
+      await h.fromUser(BOB, "/start");
+      expect(h.tg.textsTo(BOB).join()).not.toContain("管理员");
+    });
+
+    it("超过时限按钮失效，也不再显示", async () => {
+      await h.fromUser(ALICE, "/start");
+      h.clock.now += 601;
+      await h.press(ALICE, ALICE, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBeNull();
+      h.tg.reset();
+      await h.fromUser(ALICE, "/start");
+      expect(h.tg.textsTo(ALICE).at(-1)).toContain("设置中");
+      expect(labels(h.tg.last("sendMessage"))).toEqual([]);
+    });
+
+    it("已有管理员时生成新链接也不会出现按钮，换人只能走链接", async () => {
+      await h.set("ownerId", OWNER);
+      await h.set("claimExpiresAt", h.clock.now + 600);
+      await h.press(ALICE, ALICE, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(OWNER);
+      await h.fromUser(ALICE, "/start");
+      expect(h.tg.textsTo(ALICE).join()).not.toContain("成为管理员");
+      await h.fromUser(ALICE, "/start claim_abc");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(ALICE);
+      expect(h.tg.textsTo(OWNER).at(-1)).toContain("已被更换");
+    });
+
+    it("群里的按钮不算", async () => {
+      await h.press(ALICE, GROUP, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBeNull();
+    });
+
+    it("绑定日志里去掉名字中的控制字符", async () => {
+      const logged: string[] = [];
+      h.app.log = (_level, message, detail) => {
+        logged.push(`${message}：${String(detail)}`);
+      };
+      await h.send({ callback_query: { id: "c", from: { id: OWNER, is_bot: false, first_name: "假\n已绑定管理员：别人\u001b[2J" }, chat_instance: "x", data: "claim", message: { message_id: 9, date: 1, chat: { id: OWNER, type: "private" } } } } as never);
+      const line = logged.find((item) => item.startsWith("已绑定管理员"));
+      expect(line).toBeDefined();
+      expect(line).not.toMatch(/\p{Cc}/u);
+    });
+  });
 });

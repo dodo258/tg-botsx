@@ -174,11 +174,34 @@ show_claim() {
     say "已经绑定过管理员了。要换人的话运行：$MANAGE claim"
     return
   fi
-  say "用你要当管理员的 Telegram 账号打开这个链接，点「开始」（10 分钟内有效）："
+  local username
+  username="$(printf '%s' "$link" | sed -n 's#^https://t.me/\([^?]*\)?.*#\1#p')"
+  say "用你要当管理员的 Telegram 账号打开 @$username，点「开始」，再点「成为管理员」就好了（10 分钟内有效）。"
   say ""
-  say "  $link"
+  say "  https://t.me/$username"
   say ""
+  say "按钮没出现的话，用这个链接：$link"
   say "过期了运行 $MANAGE claim 重新生成。"
+  wait_for_owner
+}
+
+# 按钮谁都能看到，让部署的人亲眼看到是谁绑定的。没有终端（脚本部署）时不等
+wait_for_owner() {
+  [ -t 1 ] || return 0
+  say ""
+  say "等你点按钮…不想等可以按 Ctrl+C，机器人不受影响。"
+  local waited=0 who
+  while [ "$waited" -lt 600 ]; do
+    who="$( (cd "$DIR" && docker compose logs --no-log-prefix bot 2>/dev/null) | grep -o '已绑定管理员：.*' | tail -n 1 | tr -d '[:cntrl:]' || true)"
+    if [ -n "$who" ]; then
+      say "$who"
+      say "不是你本人的话，马上运行 $MANAGE claim，用新链接换回来。"
+      return 0
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  say "10 分钟内没有人绑定，运行 $MANAGE claim 重新生成。"
 }
 
 main() {
