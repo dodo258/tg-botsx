@@ -15,13 +15,29 @@ const TRANSFER_TTL = 10 * 60;
 
 const USER_COMMANDS = [{ command: "start", description: "开始" }];
 
-// 菜单里只放入口，其他操作都在面板里点按钮。完整命令照样能打，见 /help
+// 输入框左边的菜单：点一下就执行，不用打字。这些命令都不需要参数，要填内容的会接着问
 const STAFF_COMMANDS = [
   { command: "menu", description: "打开管理面板" },
+  { command: "list", description: "最近会话" },
+  { command: "search", description: "搜索联系人" },
+  { command: "q", description: "快捷回复" },
+  { command: "filtered", description: "隔离区" },
+  { command: "stats", description: "统计" },
   { command: "help", description: "怎么回复消息" },
 ];
 
-const OWNER_COMMANDS = STAFF_COMMANDS;
+const OWNER_COMMANDS = [
+  { command: "menu", description: "打开管理面板" },
+  { command: "list", description: "最近会话" },
+  { command: "search", description: "搜索联系人" },
+  { command: "q", description: "快捷回复" },
+  { command: "filtered", description: "隔离区" },
+  { command: "broadcast", description: "群发" },
+  { command: "schedule", description: "定时发送" },
+  { command: "settings", description: "设置" },
+  { command: "stats", description: "统计" },
+  { command: "help", description: "怎么回复消息" },
+];
 
 export async function syncCommands(app: App): Promise<void> {
   await app.tg.call("setMyCommands", { commands: USER_COMMANDS });

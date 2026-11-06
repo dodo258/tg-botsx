@@ -9,6 +9,7 @@ import {
   HELP,
   offerBroadcast,
   renderBlocked,
+  schedulePage,
   renderFiltered,
   renderQuick,
   renderRules,
@@ -19,11 +20,11 @@ import {
 import { getContact, identityHtml } from "./contacts.ts";
 import { num, str } from "./db.ts";
 import { backRow, CANCEL_KEYBOARD, clearAwaiting, currentAwaiting, handleAwaitingInput, renderMore, renderPanel, setAwaiting } from "./menus.ts";
-import { clipChars, clipHtml, escapeHtml, fitLines, kindLabel } from "./message-info.ts";
+import { clipChars, clipHtml, escapeHtml, kindLabel } from "./message-info.ts";
 import { findById, resolveDeskMessage, toMessage } from "./messages.ts";
 import { selectedUser, setSelected } from "./outbound.ts";
 import type { Schedule } from "./schedule.ts";
-import { activateSchedule, CAPTION_LIMIT, countRecipients, createDraft, deleteSchedule, describeRepeat, getSchedule, listSchedules, parseOnce, parseTimes, scheduleState, TEXT_LIMIT, toggleSchedule, WEEKDAYS } from "./schedule.ts";
+import { activateSchedule, CAPTION_LIMIT, countRecipients, createDraft, deleteSchedule, describeRepeat, getSchedule, parseOnce, parseTimes, scheduleState, TEXT_LIMIT, toggleSchedule, WEEKDAYS } from "./schedule.ts";
 import { retract } from "./sync.ts";
 import { TelegramError } from "./telegram.ts";
 
@@ -79,18 +80,6 @@ function id(value: string | undefined): number | null {
 }
 
 const quickById = (app: App, rowId: number) => app.db.prepare("SELECT name, body FROM quick_replies WHERE rowid = ?").bind(rowId).first<{ name: unknown; body: unknown }>();
-
-async function schedulePage(app: App): Promise<{ text: string; keyboard: unknown }> {
-  const schedules = await listSchedules(app.db);
-  const timezone = app.settings.timezone;
-  const count = await countRecipients(app.db, app.settings.ownerId);
-  const lines = schedules.map((item) => `<b>${escapeHtml(describeRepeat(item, timezone))}</b>（${escapeHtml(scheduleState(item, timezone))}）\n${item.photoId || item.hasAsset ? "[图片] " : ""}${clipHtml(item.text, 60)}`);
-  const buttons = schedules.slice(0, 12).map((item) => [{ text: clipChars(`${item.enabled ? "⏰" : "⏸"} ${describeRepeat(item, timezone)}`, 40), callback_data: `sv:${item.id}` }]);
-  return {
-    text: `<b>⏰ 定时发送</b>\n到点把内容发给所有联系人，现在有 ${count} 个。已屏蔽和拉黑机器人的不发。\n\n${lines.length ? fitLines(lines, "\n\n").text : "还没有。"}`,
-    keyboard: { inline_keyboard: [...buttons, [{ text: "➕ 添加", callback_data: "sa" }], backRow()] },
-  };
-}
 
 async function scheduleDetail(app: App, item: Schedule): Promise<string> {
   const timezone = app.settings.timezone;

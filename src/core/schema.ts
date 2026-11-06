@@ -170,6 +170,11 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_schedules_due ON schedules(enabled, run_at);
   ALTER TABLE broadcasts ADD COLUMN schedule_id INTEGER;
   `,
+  // 操作机器人留下的消息（面板、提示、命令），到时间自动删。聊天内容不记在这里
+  `
+  CREATE TABLE ui_messages(chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, message_id));
+  CREATE INDEX idx_ui_messages_at ON ui_messages(created_at);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

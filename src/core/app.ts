@@ -5,6 +5,8 @@ import type { Telegram } from "./telegram.ts";
 import type { Rng } from "./verify.ts";
 
 export interface App {
+  /** 发不要被自动清理的消息时用，比如快捷回复的留底。没有就是 tg */
+  keepTg?: Telegram;
   /** 进程或这个机器人正在停止。长任务要看它，及时收手 */
   isStopping?: () => boolean;
   db: Db;

@@ -7,7 +7,9 @@ import { cmdBindGroup, handleCommand, isOtherBotCommand, parseCommand } from "./
 import { noticeToOwner } from "./desk.ts";
 import { handleContactMessage } from "./inbound.ts";
 import { isServiceMessage } from "./message-info.ts";
+import { currentAwaiting } from "./menus.ts";
 import { handleStaffMessage } from "./outbound.ts";
+import { rememberUi, trackedApp } from "./ui-clean.ts";
 import { handleInput } from "./panel.ts";
 import { saveSetting } from "./settings.ts";
 import { claimIfDesignated, firstClaimOpen, sendClaimPrompt, tryClaim } from "./setup.ts";
@@ -25,11 +27,19 @@ async function staffPipeline(app: App, message: Message, staffId: number): Promi
   const command = parseCommand(message.text, app.settings.botUsername);
   // 双斜杠是内部备注，不算命令
   const isSlash = message.text?.startsWith("/") === true && !message.text.startsWith("//");
-  if (await handleInput(app, message, staffId)) return;
+  // 主人私聊里操作机器人的消息要自动清理。群发的内容不算：之后还要从这条复制
+  const ui = trackedApp(app, message.chat.id);
+  const owned = ui !== app;
+  const keepSource = (await currentAwaiting(app, staffId, message)) === "p:broadcast";
+  if (await handleInput(ui, message, staffId)) {
+    if (owned && !keepSource) await rememberUi(app, message.chat.id, message.message_id);
+    return;
+  }
   if (command) {
-    const known = await handleCommand(app, message, staffId, command.name, command.args);
+    if (owned) await rememberUi(app, message.chat.id, message.message_id);
+    const known = await handleCommand(ui, message, staffId, command.name, command.args);
     if (!known) {
-      await app.tg.call("sendMessage", {
+      await ui.tg.call("sendMessage", {
         chat_id: message.chat.id,
         ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }),
         text: "没有这个命令，发 /help 看看。这条没有发给对方。",

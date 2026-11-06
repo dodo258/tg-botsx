@@ -18,6 +18,7 @@ import { broadcastTick } from "./maintenance.ts";
 import { claimByButton, fetchBot, syncCommands } from "./setup.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
+import { trackedApp } from "./ui-clean.ts";
 
 async function deleteQuietly(ctx: Ctx): Promise<void> {
   try {
@@ -145,6 +146,12 @@ async function ownerAction(ctx: Ctx, action: string, arg: string, extra: string 
       return true;
     }
     case "mc":
+      if (arg === "uiClean" && ["0", "1", "6", "24"].includes(extra ?? "")) {
+        await saveSetting(app.db, app.settings, "uiCleanHours", Number(extra));
+        const menu = renderMenu(app, "data");
+        await edit(ctx, menu.text, menu.keyboard);
+        return true;
+      }
       if (arg === "welcomePhoto") {
         await saveSetting(app.db, app.settings, "welcomePhotoId", "");
         await saveSetting(app.db, app.settings, "welcomeImage", false);
@@ -337,7 +344,8 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
     });
   };
   if (!message) return await answer("这条消息太旧了，操作不了。", true);
-  const ctx: Ctx = { app, query, chatId: message.chat.id, messageId: message.message_id, answer };
+  // 主人私聊里点按钮时机器人发的消息要自动清理。验证题这些给陌生人的不在主人聊天里，不受影响
+  const ctx: Ctx = { app: trackedApp(app, message.chat.id), query, chatId: message.chat.id, messageId: message.message_id, answer };
   const [action = "", arg = "", extra] = data.split(":");
 
   if (action === "v" || action === "vr") {

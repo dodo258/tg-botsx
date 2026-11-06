@@ -12,6 +12,7 @@ import { toMessage } from "./messages.ts";
 import { failureText, markUnreachable, recordOutbound, routeOf } from "./outbound.ts";
 import { fetchBot, syncCommands } from "./setup.ts";
 import { saveSetting } from "./settings.ts";
+import { countRecipients, describeRepeat, listSchedules, scheduleState } from "./schedule.ts";
 import { SCHEMA_VERSION } from "./schema.ts";
 import { retract } from "./sync.ts";
 import { TelegramError } from "./telegram.ts";
@@ -183,6 +184,18 @@ function formatDuration(seconds: number): string {
   return `${(seconds / 3600).toFixed(1)} 小时`;
 }
 
+export async function schedulePage(app: App): Promise<{ text: string; keyboard: unknown }> {
+  const schedules = await listSchedules(app.db);
+  const timezone = app.settings.timezone;
+  const count = await countRecipients(app.db, app.settings.ownerId);
+  const lines = schedules.map((item) => `<b>${escapeHtml(describeRepeat(item, timezone))}</b>（${escapeHtml(scheduleState(item, timezone))}）\n${item.photoId || item.hasAsset ? "[图片] " : ""}${clipHtml(item.text, 60)}`);
+  const buttons = schedules.slice(0, 12).map((item) => [{ text: clipChars(`${item.enabled ? "⏰" : "⏸"} ${describeRepeat(item, timezone)}`, 40), callback_data: `sv:${item.id}` }]);
+  return {
+    text: `<b>⏰ 定时发送</b>\n到点把内容发给所有联系人，现在有 ${count} 个。已屏蔽和拉黑机器人的不发。\n\n${lines.length ? fitLines(lines, "\n\n").text : "还没有。"}`,
+    keyboard: { inline_keyboard: [...buttons, [{ text: "➕ 添加", callback_data: "sa" }], backRow()] },
+  };
+}
+
 export async function statsText(app: App): Promise<string> {
   const today = dayKey(app.now(), app.settings.timezone);
   const weekAgo = dayKey(app.now() - 6 * 86_400, app.settings.timezone);
@@ -219,7 +232,8 @@ export async function deliverQuick(app: App, contact: Contact, body: string, cha
   // 对方已经收到了。留底失败不能说「没发出去」，否则管理员会再发一遍
   let shownId = 0;
   try {
-    const shown = await app.tg.call<{ message_id: number }>("sendMessage", { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), text: body });
+    // 这是聊天内容的留底，不是菜单，不能被自动清理
+    const shown = await (app.keepTg ?? app.tg).call<{ message_id: number }>("sendMessage", { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), text: body });
     shownId = shown.message_id;
   } catch (error) {
     app.log("warn", "快捷回复留底失败", error instanceof Error ? error.message : String(error));
@@ -281,7 +295,8 @@ async function cmdBroadcast(app: App, message: Message, args: string): Promise<v
   const source = message.reply_to_message;
   // 话题里不引用也带 reply_to_message，指向话题创建消息，不能当群发内容
   if (!source || Object.hasOwn(source, "forum_topic_created")) {
-    await say(app, message, "先写好要群发的内容，然后回复那条消息发 /broadcast。也可以在面板里点「群发」。");
+    await setAwaiting(app, message.from?.id ?? message.chat.id, "p:broadcast", { chatId: message.chat.id, threadId: message.message_thread_id });
+    await say(app, message, "把要群发的内容发给我，文字、图片、文件都可以，一次一条。发完会先问你确认，不会马上发出去。", CANCEL_KEYBOARD);
     return;
   }
   await offerBroadcast(app, message, source.message_id);
@@ -420,7 +435,8 @@ export async function handleCommand(app: App, message: Message, staffId: number,
     }
     case "search": {
       if (!args) {
-        await say(app, message, "用法：/search 名字、用户名或 ID");
+        await setAwaiting(app, staffId, "p:search", { chatId: message.chat.id, threadId: message.message_thread_id });
+        await say(app, message, "发来要找的名字、用户名、备注或数字 ID。", CANCEL_KEYBOARD);
         return true;
       }
       await searchContacts(app, message, args);
@@ -512,6 +528,12 @@ export async function handleCommand(app: App, message: Message, staffId: number,
     }
     case "filtered": {
       const page = await renderFiltered(app, 0);
+      await say(app, message, page.text, page.keyboard);
+      return true;
+    }
+    case "schedule": {
+      if (!(await ownerOnly())) return true;
+      const page = await schedulePage(app);
       await say(app, message, page.text, page.keyboard);
       return true;
     }

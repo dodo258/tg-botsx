@@ -176,7 +176,7 @@ export function startWeb(options: WebOptions): Server {
     const db = sqliteDb(dbPath(env, name));
     try {
       const s = await loadSettings(db);
-      return { welcome: s.welcome, verify: s.verifyMode === "quiz", hasImage: s.welcomeImage };
+      return { welcome: s.welcome, verify: s.verifyMode === "quiz", hasImage: s.welcomeImage, uiCleanHours: s.uiCleanHours };
     } finally {
       db.close();
     }
@@ -355,6 +355,7 @@ export function startWeb(options: WebOptions): Server {
             await db.prepare("INSERT INTO assets(name, mime, data) VALUES('welcome', ?, ?)").bind(upload[1] ?? "", bytes.toString("base64")).run();
             await saveSetting(db, settings, "welcomeImage", true);
           }
+          if (typeof body.uiCleanHours === "number" && [0, 1, 6, 24].includes(body.uiCleanHours)) await saveSetting(db, settings, "uiCleanHours", body.uiCleanHours);
           if (typeof body.verify === "boolean") await saveSetting(db, settings, "verifyMode", body.verify ? "quiz" : "off");
         } finally {
           db.close();

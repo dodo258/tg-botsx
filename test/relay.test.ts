@@ -945,13 +945,14 @@ describe("管理面板：不打命令也能管理", () => {
     expect(h.tg.textsTo(OWNER).at(-1)).toContain("管理面板");
   });
 
-  it("命令菜单只留入口，打完整命令还能用", async () => {
+  it("输入框左边的菜单有常用命令", async () => {
     h = await makeHarness({ verify: false, owner: false });
     await h.set("claimCode", "abc");
     await h.set("claimExpiresAt", h.clock.now + 100);
     await h.fromUser(OWNER, "/start claim_abc");
     const owner = h.tg.named("setMyCommands").find((params) => params.scope !== undefined);
-    expect((owner?.commands as { command: string }[]).map((item) => item.command)).toEqual(["menu", "help"]);
+    const names = (owner?.commands as { command: string }[]).map((item) => item.command);
+    for (const name of ["menu", "list", "search", "q", "broadcast", "schedule", "settings", "help"]) expect(names).toContain(name);
     await h.fromOwner("/stats");
     expect(h.tg.textsTo(OWNER).at(-1)).toContain("今天");
   });
@@ -2038,6 +2039,138 @@ describe("定时发送", () => {
     await h.fromOwner("新文字");
     await h.fromUser(7003, "/start");
     expect(h.tg.last("sendPhoto")).toMatchObject({ chat_id: 7003, photo: "w", caption: "新文字" });
+  });
+});
+
+describe("输入框左边的菜单", () => {
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+  });
+
+  it("点搜索和群发不用带参数，接着问", async () => {
+    await h.fromUser(ALICE, "hi");
+    await h.fromOwner("/search");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("要找的名字");
+    await h.fromOwner("u2001");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("用户2001");
+    await h.fromOwner("/broadcast");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("要群发的内容");
+    await h.fromOwner("大家好");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("个联系人吗");
+  });
+
+  it("点定时发送打开列表；同事不能用", async () => {
+    await h.fromOwner("/schedule");
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("定时发送");
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    await h.fromGroup(7777, "/schedule", null);
+    expect(String(h.tg.last("sendMessage").text)).toContain("只有主人");
+  });
+});
+
+describe("菜单消息自动清理", () => {
+  beforeEach(async () => {
+    h = await makeHarness({ verify: false });
+    await h.fromUser(ALICE, "客户的私信");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.app.db.prepare("DELETE FROM ui_messages").run();
+    h.tg.reset();
+  });
+  const deleted = () => h.tg.named("deleteMessage").map((params) => params.message_id);
+
+  it("到时间删掉命令和面板；转来的私信和管理员的回复不动", async () => {
+    const reply = await h.fromOwner("给客户的回复");
+    const command = await h.fromOwner("/menu");
+    const panel = Number(h.tg.calls.filter((call) => call.method === "sendMessage").length);
+    expect(panel).toBeGreaterThan(0);
+    await h.fromUser(BOB, "另一个人的私信");
+    const copies = h.tg.named("copyMessage").length;
+    expect(copies).toBeGreaterThan(0);
+    h.clock.now += 23 * 3600;
+    await tick(h.app);
+    expect(deleted()).toEqual([]);
+    h.clock.now += 3600 + 1;
+    await tick(h.app);
+    expect(deleted()).toContain(command);
+    expect(deleted()).not.toContain(reply);
+    expect(deleted()).toHaveLength(2);
+    const stored = await h.app.db.prepare("SELECT desk_msg_id FROM messages").all<{ desk_msg_id: unknown }>();
+    for (const item of stored) expect(deleted()).not.toContain(item.desk_msg_id);
+  });
+
+  it("只删一次，删过的不再删", async () => {
+    await h.fromOwner("/menu");
+    h.clock.now += 25 * 3600;
+    await tick(h.app);
+    const count = deleted().length;
+    await tick(h.app);
+    expect(deleted()).toHaveLength(count);
+  });
+
+  it("可以改时间，也可以关掉", async () => {
+    await h.press(OWNER, OWNER, 1, "mc:uiClean:0");
+    await h.send({});
+    await h.fromOwner("/menu");
+    h.clock.now += 25 * 3600;
+    await tick(h.app);
+    expect(deleted()).toEqual([]);
+    await h.press(OWNER, OWNER, 1, "mc:uiClean:1");
+    await h.send({});
+    await h.fromOwner("/menu");
+    h.clock.now += 3601;
+    await tick(h.app);
+    expect(deleted().length).toBeGreaterThan(0);
+  });
+
+  it("点按钮时发的提示也清理，改设置时输入的内容也清理", async () => {
+    await h.press(OWNER, OWNER, 1, "mi:welcome");
+    const typed = await h.fromOwner("新欢迎语");
+    h.clock.now += 25 * 3600;
+    await tick(h.app);
+    expect(deleted()).toContain(typed);
+    expect(deleted().length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("群发的内容不能删：之后还要从这条复制", async () => {
+    await h.press(OWNER, OWNER, 1, "bc");
+    const source = await h.fromOwner("群发内容");
+    h.clock.now += 25 * 3600;
+    await tick(h.app);
+    expect(deleted()).not.toContain(source);
+  });
+
+  it("快捷回复的留底是聊天内容，不清理", async () => {
+    await h.fromOwner("/qadd 价格 99 元");
+    await h.press(OWNER, OWNER, 1, `qp:${ALICE}`);
+    const picker = (h.tg.last("sendMessage").reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat().find((button) => button.text === "价格")?.callback_data ?? "";
+    await h.press(OWNER, OWNER, 2, picker);
+    const stored = await row("SELECT desk_msg_id FROM messages WHERE direction = 'out'");
+    h.clock.now += 25 * 3600;
+    await tick(h.app);
+    expect(deleted().length).toBeGreaterThan(0);
+    expect(deleted()).not.toContain(stored.desk_msg_id);
+  });
+
+  it("删不掉的不重试，限流时下一轮再删，不影响别的", async () => {
+    await h.fromOwner("/menu");
+    await h.fromOwner("/stats");
+    h.clock.now += 25 * 3600;
+    h.tg.failNext("deleteMessage", 429, "Too Many Requests", 1);
+    await tick(h.app);
+    const remaining = num((await row("SELECT COUNT(*) AS n FROM ui_messages")).n);
+    expect(remaining).toBeGreaterThan(0);
+    h.tg.failNext("deleteMessage", 400, "Bad Request: message to delete not found");
+    await tick(h.app);
+    expect(num((await row("SELECT COUNT(*) AS n FROM ui_messages")).n)).toBe(0);
+  });
+
+  it("超过 47 小时的不再尝试（Telegram 不让删）", async () => {
+    await h.fromOwner("/menu");
+    h.clock.now += 48 * 3600;
+    await tick(h.app);
+    expect(deleted()).toEqual([]);
+    expect(num((await row("SELECT COUNT(*) AS n FROM ui_messages")).n)).toBe(0);
   });
 });
 

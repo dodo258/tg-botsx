@@ -7,6 +7,7 @@ import { toMessage } from "./messages.ts";
 import { scheduleTick, sendScheduled, getSchedule } from "./schedule.ts";
 import { saveSetting } from "./settings.ts";
 import { TelegramError } from "./telegram.ts";
+import { cleanUi } from "./ui-clean.ts";
 
 const BROADCAST_BATCH = 25;
 const BROADCAST_LEASE = 120;
@@ -133,7 +134,7 @@ export async function dailyCleanup(app: App): Promise<void> {
 }
 
 export async function tick(app: App): Promise<void> {
-  for (const job of [scheduleTick, broadcastTick, retryFailed, reportGivenUp, dailyCleanup]) {
+  for (const job of [scheduleTick, broadcastTick, retryFailed, reportGivenUp, cleanUi, dailyCleanup]) {
     try {
       await job(app);
     } catch (error) {

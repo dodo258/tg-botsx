@@ -16,6 +16,8 @@ export interface Settings {
   lockMinutes: number;
   welcome: string;
   /** 第一次自动回复带的图片：Telegram 的文件编号；网页上传的第一次发送后才有 */
+  /** 操作机器人留下的消息多少小时后自动删，0 是不删。Telegram 只让删 48 小时内的，所以最长 24 */
+  uiCleanHours: number;
   welcomePhotoId: string;
   welcomeImage: boolean;
   receiptEnabled: boolean;
@@ -66,6 +68,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxVerifyFailures: 3,
   lockMinutes: 60,
   welcome: "你好，这里是留言通道。\n直接发文字、图片或文件就行，我们看到后会在这里回复你。",
+  uiCleanHours: 24,
   welcomePhotoId: "",
   welcomeImage: false,
   receiptEnabled: true,
