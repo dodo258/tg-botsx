@@ -1,0 +1,7 @@
+# 网页管理，直接对外开一个 HTTPS 端口（程序自签的证书）。tgbot web on 时启用。
+services:
+  bot:
+    environment:
+      WEB_LISTEN_PORT: "8443"
+    ports:
+      - "${WEB_PORT:-8443}:8443"

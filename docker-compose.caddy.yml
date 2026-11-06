@@ -1,0 +1,24 @@
+# 网页管理，用自己的域名。Caddy 自动申请并续期 Let's Encrypt 证书，要求 80 和 443 端口空闲、域名已解析到这台服务器。
+services:
+  bot:
+    environment:
+      WEB_LISTEN_PORT: "8443"
+      WEB_IP_HEADER: x-forwarded-for
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - bot
+
+volumes:
+  caddy_data:
+  caddy_config:

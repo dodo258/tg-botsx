@@ -4,12 +4,9 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
-    # 网页管理。机器人本身只往外连 Telegram，只有这一个端口对外，有 HTTPS 和登录密钥
-    ports:
-      - "${WEB_PORT:-8443}:8443"
     volumes:
       - data:/data
-    # 容器不给多余权限
+    # 机器人只往外连 Telegram，不开端口，容器也不给多余权限。要网页管理时 tgbot web on 加上端口
     read_only: true
     tmpfs:
       - /tmp

@@ -44,6 +44,7 @@ check("输出了配对图案", /配对图案：\S+ \S+/.test(first.out), first.o
 check("输出里没有 Token 明文", !first.out.includes(TOKEN));
 check(".env 权限是 600", execSync(`sudo stat -c %a ${DIR}/.env`, { encoding: "utf8" }).trim() === "600");
 check("tgbot 命令已安装", existsSync("/usr/local/bin/tgbot"));
+check("默认不开网页，容器没有对外端口", execSync("sudo docker ps --format '{{.Ports}}'", { encoding: "utf8" }).trim() === "", first.out);
 
 const code = /claim_([\w-]+)/.exec(first.out)?.[1] ?? "";
 fake.queue.push({ update_id: 1, message: { message_id: 1, date: 1, chat: { id: 1000, type: "private" }, from: { id: 1000, is_bot: false, first_name: "主人" }, text: `/start claim_${code}` } });
@@ -158,26 +159,39 @@ check("新机器人的数据库里没有默认机器人的访客", !(await hasCo
 const otherBackup = await sudo(`tgbot ${OTHER_NAME} backup`);
 check("按名字备份，文件名带名字", otherBackup.code === 0 && otherBackup.out.includes(`relay-${OTHER_NAME}-`), otherBackup.out);
 
-// 网页管理：第一次安装给了随机密码，本机能通过 HTTPS 登录
-const passwordLine = /密码：([0-9a-f]+)/.exec(first.out)?.[1] ?? "";
-check("第一次安装给了网页密码", passwordLine !== "", first.out);
-check(".env 里没有网页密码", !execSync(`sudo cat ${DIR}/.env`, { encoding: "utf8" }).includes(passwordLine));
+// 网页管理是可选的：装完再开，随机密码只显示一次
+const notEnabled = await sudo("tgbot web");
+check("没开时 tgbot web 说怎么开", notEnabled.code === 0 && notEnabled.out.includes("tgbot web on"), notEnabled.out);
+const badDomain = await sudo("tgbot web on 'bad domain'");
+check("不合法的域名被拒绝", badDomain.code !== 0 && badDomain.out.includes("域名不对"), badDomain.out);
+const caddyConfig = await sudo(`cd ${DIR} && WEB_DOMAIN=bot.example.com docker compose -f docker-compose.yml -f docker-compose.caddy.yml config --quiet && test -f Caddyfile && echo CONFIG_OK`);
+check("Let's Encrypt 这套配置文件有效", caddyConfig.out.includes("CONFIG_OK"), caddyConfig.out);
+const webOn = await sudo("tgbot web on");
+check("tgbot web on 成功并给出密码", webOn.code === 0 && webOn.out.includes("账号：admin"), webOn.out);
+const passwordLine = /密码：([0-9a-f]+)/.exec(webOn.out)?.[1] ?? "";
+check(".env 里没有网页密码", passwordLine !== "" && !execSync(`sudo cat ${DIR}/.env`, { encoding: "utf8" }).includes(passwordLine));
 const webPort = execSync(`sudo sed -n 's/^WEB_PORT=//p' ${DIR}/.env`, { encoding: "utf8" }).trim();
+await sleep(3000);
 const webLogin = await sudo(`curl -sk -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -d '{"user":"admin","password":"${passwordLine}"}' https://127.0.0.1:${webPort}/api/login`);
 check("网页能用这个密码登录", webLogin.out.trim() === "200", webLogin.out);
 const webAnon = await sudo(`curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:${webPort}/api/bots`);
 check("网页没登录拿不到列表", webAnon.out.trim() === "401", webAnon.out);
 const webInfo = await sudo("tgbot web");
 check("tgbot web 显示地址", webInfo.code === 0 && webInfo.out.includes(`:${webPort}`), webInfo.out);
+check("开网页时机器人的数据还在", await hasContact(OTHER_DB, 6001));
 
 const updatedAll = await sudo("tgbot update");
 check("tgbot update 后两个机器人都在", updatedAll.code === 0 && updatedAll.out.includes("已连上 Telegram"), updatedAll.out);
-check("重复安装不再生成网页密码", !updatedAll.out.includes("密码只显示这一次"), updatedAll.out);
+check("更新后网页还开着，不换密码", !updatedAll.out.includes("密码只显示这一次") && execSync("sudo docker ps --format '{{.Ports}}'", { encoding: "utf8" }).includes(webPort), updatedAll.out);
 await sleep(5000);
 check("更新后新机器人的数据还在", await hasContact(OTHER_DB, 6001));
 
 const unknownBot = await sudo("tgbot meiyou status");
 check("名字不存在时说清楚", unknownBot.code !== 0 && unknownBot.out.includes("没有叫 meiyou 的机器人"), unknownBot.out);
+
+const webOff = await sudo("tgbot web off");
+check("tgbot web off 关掉对外端口，机器人还在", webOff.code === 0 && execSync("sudo docker ps --format '{{.Ports}}'", { encoding: "utf8" }).trim() === "", webOff.out);
+await sleep(3000);
 
 // 删除其中一个，另一个要留着
 const removedOther = await sudo(`tgbot ${OTHER_NAME} uninstall`, "删除\n");

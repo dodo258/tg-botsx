@@ -8,7 +8,7 @@
 
 先在 Telegram 打开 [@BotFather](https://t.me/BotFather)，发 `/newbot`，按提示取名，拿到一串 Token。
 
-部署到自己的服务器，不需要域名，数据都在你手里。同一个 Token 只能跑一份。
+部署到自己的服务器，不需要域名，默认不开任何端口，数据都在你手里。同一个 Token 只能跑一份。
 
 用 root 运行，需要 Linux。没有 Docker 时脚本会问你要不要装。
 
@@ -48,13 +48,21 @@ tgbot uninstall       卸载，默认保留数据
 
 这里的隔离是机器人之间的：有服务器 root 权限的人能读到所有 Token 和聊天记录。替别人开之前请告诉对方；不想让你看到的人，应该部署到自己的服务器。
 
-### 网页管理
+### 网页管理（可选）
 
-添加机器人、看谁在用、重新指定管理员、改欢迎语和验证开关，都在网页上。网页看不到聊天内容。
+只跑一个机器人不需要它：填 Token 就能用，服务器不开任何端口。要给多个人开机器人，网页会方便很多：添加机器人、看谁在用、重新指定管理员、改欢迎语和验证开关。网页看不到聊天内容和 Token。
 
-安装完会显示地址和随机密码。运行 `tgbot web` 再看地址，`tgbot web-password` 重设账号密码。
+安装时会问要不要。之后也能随时开关：
 
-没有域名时用程序自签的证书，第一次打开浏览器会提示不安全，点「高级」再继续就行。有域名的话放在 Cloudflare 代理（SSL 模式 Full）或自己的反代后面，安装时用 `WEB_PORT=2053 WEB_URL=https://bot.example.com` 指定端口和地址。
+```text
+tgbot web on 域名     用自己的域名，自动申请并续期 Let's Encrypt 证书（要 80、443 端口空闲，域名先解析过来）
+tgbot web on          没有域名，开一个随机端口，用自签名证书，第一次打开浏览器会提示不安全
+tgbot web off         关掉，对外端口也关了，机器人不受影响
+tgbot web             看地址
+tgbot web-password    重设账号密码
+```
+
+服务器的 80、443 被别的程序占着时，放在 Cloudflare 代理（SSL 模式 Full）或自己的反代后面：`WEB_PORT=2053 WEB_URL=https://bot.example.com tgbot web on`，并在 `.env` 里写 `WEB_IP_HEADER=cf-connecting-ip`。
 
 不想用 Docker：需要 Node.js 22.18+（Ubuntu 上用官方压缩包时还要 `apt install libatomic1`），把仓库放到 `/opt/tg-botsx`，写好 `.env`，用 [deploy/tg-botsx.service](deploy/tg-botsx.service) 启动。运行时没有第三方依赖，不用 `npm install`。
 
@@ -111,7 +119,7 @@ tgbot uninstall       卸载，默认保留数据
 - 单人刷屏自动暂停 10 分钟。陌生人突然大量涌入时自动进入防护，已验证的联系人不受影响。
 
 **安全**
-- 机器人只往外连 Telegram。对外只有网页管理一个 HTTPS 端口，要账号密码，看不到聊天内容和 Token。容器不给多余权限。
+- 默认不开任何端口，机器人只往外连 Telegram，容器也不给多余权限。开了网页管理才有一个 HTTPS 端口，要账号密码，看不到聊天内容和 Token。
 - 只有主人能改设置、群发、导出。其他群里的消息一律不碰。
 - 不收集 IP 和设备信息。机器人只看得到 Telegram 给的名字和用户名。
 

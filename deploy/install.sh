@@ -10,8 +10,9 @@
 #   TGBOTSX_DIR         安装目录，默认 /opt/tg-botsx
 #   BOT_TOKENS          多个机器人的 Token，空格或换行分开；第一个是默认机器人
 #   TGBOTSX_YES=1       所有确认都按「是」
-#   WEB_PORT            网页管理的对外端口，不设置就随机取一个
-#   WEB_URL             网页管理的完整地址，用自己的域名时设置
+#   WEB_MODE            网页管理：off 不要、port 没有域名、domain 用 WEB_DOMAIN。不设置就问
+#   WEB_DOMAIN          网页管理用的域名，自动申请 Let's Encrypt 证书
+#   WEB_PORT、WEB_URL   放在 Cloudflare 或自己的反代后面时，指定端口和对外地址
 set -euo pipefail
 
 REPO="${TGBOTSX_REPO:-dodo258/tg-botsx}"
@@ -19,7 +20,7 @@ BRANCH="${TGBOTSX_BRANCH:-main}"
 DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
 MANAGE="tgbot"
 MORE_TOKENS=""
-WEB_FIRST_PASSWORD=""
+WEB_CHOICE="${WEB_MODE:-}"
 # 从 tgbot update 调用时可能继承 umask 077，程序文件必须让容器里的 node 用户读得到
 umask 022
 
@@ -81,7 +82,7 @@ fetch_source() {
   local staging
   staging="$(mktemp -d)"
   if [ -n "${TGBOTSX_SOURCE:-}" ]; then
-    cp -R "$TGBOTSX_SOURCE/src" "$TGBOTSX_SOURCE/package.json" "$TGBOTSX_SOURCE/Dockerfile" "$TGBOTSX_SOURCE/.dockerignore" "$TGBOTSX_SOURCE/docker-compose.yml" "$TGBOTSX_SOURCE/.env.example" "$staging/"
+    cp -R "$TGBOTSX_SOURCE/src" "$TGBOTSX_SOURCE/package.json" "$TGBOTSX_SOURCE/Dockerfile" "$TGBOTSX_SOURCE/.dockerignore" "$TGBOTSX_SOURCE/docker-compose.yml" "$TGBOTSX_SOURCE/docker-compose.web.yml" "$TGBOTSX_SOURCE/docker-compose.caddy.yml" "$TGBOTSX_SOURCE/.env.example" "$staging/"
     cp -R "$TGBOTSX_SOURCE/deploy" "$staging/deploy"
   else
     curl -fsSL --max-time 120 "https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH" | tar -xz --strip-components=1 -C "$staging" || die "下载程序失败。服务器能访问 GitHub 吗？"
@@ -90,9 +91,10 @@ fetch_source() {
   # 只替换程序文件。.env 和数据卷都不碰，也不做任何镜像式删除
   rm -rf "$DIR/src"
   cp -R "$staging/src" "$DIR/src"
-  for file in package.json Dockerfile .dockerignore docker-compose.yml .env.example; do
+  for file in package.json Dockerfile .dockerignore docker-compose.yml docker-compose.web.yml docker-compose.caddy.yml .env.example; do
     cp "$staging/$file" "$DIR/$file"
   done
+  cp "$staging/deploy/Caddyfile" "$DIR/Caddyfile"
   install -m 755 "$staging/deploy/tgbot" /usr/local/bin/tgbot
   rm -rf "$staging"
   say "程序在 $DIR"
@@ -166,32 +168,46 @@ configure_token() {
   )
 }
 
-# 网页管理的端口。已有的不换，重复安装后地址不变；随机取，避开常见端口
-ensure_web_config() {
-  local env_file="$DIR/.env" port
-  (
-    umask 077
-    if ! grep -q '^WEB_PORT=' "$env_file"; then
-      port="${WEB_PORT:-$(( ( $(od -An -N2 -tu2 /dev/urandom) % 40000 ) + 20000 ))}"
-      printf 'WEB_PORT=%s\n' "$port" >> "$env_file"
-    fi
-    if [ -n "${WEB_URL:-}" ] && ! grep -q '^WEB_URL=' "$env_file"; then
-      printf 'WEB_URL=%s\n' "$WEB_URL" >> "$env_file"
-    fi
-    chmod 600 "$env_file"
-  )
+# 第一次安装时问一次。只跑一个机器人不需要网页，默认不开，也就不开任何端口
+choose_web() {
+  # 从开了网页的旧版本更新：端口配置在，但还没有 COMPOSE_FILE
+  if [ -f "$DIR/.env" ] && grep -q '^WEB_PORT=' "$DIR/.env" && ! grep -q '^COMPOSE_FILE=' "$DIR/.env"; then
+    printf 'COMPOSE_FILE=docker-compose.yml:docker-compose.web.yml\n' >> "$DIR/.env"
+  fi
+  if [ -f "$DIR/.env" ] && grep -q '^BOT_TOKEN=\|^COMPOSE_FILE=' "$DIR/.env"; then
+    WEB_CHOICE="${WEB_CHOICE:-keep}"
+    return
+  fi
+  if [ -n "$WEB_CHOICE" ]; then return; fi
+  if [ "${TGBOTSX_YES:-}" = "1" ] || [ ! -r /dev/tty ]; then
+    WEB_CHOICE=off
+    return
+  fi
+  step "网页管理（可选）"
+  say "只跑一个机器人的话不需要它，不开任何端口。要给多个人开机器人，用网页会方便很多。"
+  say "  1) 不要（默认）"
+  say "  2) 要，用我自己的域名（自动申请 Let's Encrypt 证书并续期，需要 80 和 443 端口空闲）"
+  say "  3) 要，我没有域名（用自签名证书，第一次打开浏览器会提示不安全）"
+  local answer
+  read -r -p "选择 [1]: " answer < /dev/tty || answer=1
+  case "$answer" in
+    2)
+      WEB_CHOICE=domain
+      while [ -z "${WEB_DOMAIN:-}" ]; do
+        read -r -p "域名（先解析到这台服务器，比如 bot.example.com）: " WEB_DOMAIN < /dev/tty || die "读不到输入。"
+      done
+      ;;
+    3) WEB_CHOICE=port ;;
+    *) WEB_CHOICE=off ;;
+  esac
 }
 
-# 第一次安装随机生成账号密码，只显示这一次。数据卷里已有账号时不动
-ensure_web_login() {
-  local compose_exec=(docker compose exec -T bot)
-  if (cd "$DIR" && "${compose_exec[@]}" test -f /data/web/auth.json </dev/null); then
-    return 0
-  fi
-  local password
-  password="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
-  printf 'admin\n%s\n' "$password" | (cd "$DIR" && "${compose_exec[@]}" node --disable-warning=ExperimentalWarning src/runtime/node.ts web-auth) >/dev/null
-  WEB_FIRST_PASSWORD="$password"
+apply_web() {
+  case "$WEB_CHOICE" in
+    domain) step "网页管理"; TGBOTSX_DIR="$DIR" /usr/local/bin/tgbot web on "$WEB_DOMAIN" || say "网页管理没开成，机器人不受影响。看上面的原因，解决后运行 tgbot web on $WEB_DOMAIN。" ;;
+    port) step "网页管理"; TGBOTSX_DIR="$DIR" /usr/local/bin/tgbot web on || say "网页管理没开成，机器人不受影响。稍后运行 tgbot web on。" ;;
+    *) ;;
+  esac
 }
 
 add_more_bots() {
@@ -204,21 +220,8 @@ add_more_bots() {
   say "把机器人的用户名发给要用的人，对方私聊机器人，点「成为管理员」就好了。"
 }
 
-show_web() {
-  step "网页管理"
-  TGBOTSX_DIR="$DIR" /usr/local/bin/tgbot web || say "取不到网页管理地址，稍后运行 tgbot web。"
-  if [ -n "${WEB_FIRST_PASSWORD:-}" ]; then
-    say "账号：admin"
-    say "密码：$WEB_FIRST_PASSWORD"
-    say "密码只显示这一次。要改成自己的，运行 tgbot web-password，或登录后在网页里改。"
-  else
-    say "登录用你之前设的账号密码，忘了运行 tgbot web-password 重设。"
-  fi
-}
-
 start_bot() {
   step "启动机器人"
-  ensure_web_config
   (cd "$DIR" && docker compose up -d --build --remove-orphans) || die "启动失败，请看上面的报错。"
   local waited=0
   until (cd "$DIR" && docker compose logs bot 2>/dev/null | grep -q '已连接'); do
@@ -283,15 +286,16 @@ main() {
   ensure_tools
   ensure_docker
   mkdir -p "$DIR"
+  choose_web
   # 先校验 Token 再动程序文件，校验不过时现有版本不受影响
   configure_token
   fetch_source
   start_bot
-  ensure_web_login
+  apply_web
   add_more_bots
-  show_web
   show_claim
   step "装好了"
+  [ "$WEB_CHOICE" != "off" ] || say "以后想用网页管理，运行 tgbot web on。"
   say "以后管理机器人运行：$MANAGE"
   say "其他操作都在 Telegram 里：给机器人发 /start 打开管理面板，点按钮就行。"
 }

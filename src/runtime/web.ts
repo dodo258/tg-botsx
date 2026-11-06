@@ -96,7 +96,11 @@ export function startWeb(options: WebOptions): Server {
   const failures = new Map<string, { count: number; until: number }>();
   const now = () => Math.floor(Date.now() / 1000);
 
-  const clientIp = (req: IncomingMessage) => text(req.headers["cf-connecting-ip"]) || req.socket.remoteAddress || "";
+  // 只在明确配置时才信代理传来的 IP：直连端口的人可以随便伪造这个请求头
+  const ipHeader = process.env.WEB_IP_HEADER?.toLowerCase();
+  const clientIp = (req: IncomingMessage) => (ipHeader ? text(req.headers[ipHeader]).split(",")[0]?.trim() : "") || req.socket.remoteAddress || "";
+  // 总量限制：伪造 IP 也绕不过。比单个 IP 宽，正常情况碰不到
+  let globalFailures = { count: 0, windowEnds: 0 };
 
   const sessionOf = (req: IncomingMessage): string | null => {
     const match = new RegExp(`(?:^|; )${COOKIE}=([a-f0-9]{64})`).exec(req.headers.cookie ?? "");
@@ -133,12 +137,15 @@ export function startWeb(options: WebOptions): Server {
       const ip = clientIp(req);
       const record = failures.get(ip);
       if (record && record.until > now()) throw new HttpError(429, "试错太多次了，15 分钟后再试。");
+      if (globalFailures.windowEnds > now() && globalFailures.count >= 50) throw new HttpError(429, "最近登录失败太多，15 分钟后再试。");
       const body = await readJson(req);
       const auth = readAuth(env);
       if (!auth) throw new HttpError(503, "还没有设置账号，在服务器上运行 tgbot web-password。");
       if (!verify(auth, text(body.user), text(body.password))) {
         const count = (record?.count ?? 0) + 1;
         failures.set(ip, { count, until: count >= 5 ? now() + 900 : 0 });
+        if (globalFailures.windowEnds <= now()) globalFailures = { count: 0, windowEnds: now() + 900 };
+        globalFailures.count++;
         throw new HttpError(401, "账号或密码不对。");
       }
       failures.delete(ip);

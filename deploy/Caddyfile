@@ -1,0 +1,8 @@
+{$WEB_DOMAIN} {
+	reverse_proxy https://bot:8443 {
+		# 只在容器内部网络里走，这一段的证书是程序自签的
+		transport http {
+			tls_insecure_skip_verify
+		}
+	}
+}
