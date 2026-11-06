@@ -3,6 +3,7 @@ import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
 import { CLAIM_PAIRS, createClaim } from "../src/core/setup.ts";
+import { cryptoRng, makeChallenge } from "../src/core/verify.ts";
 
 let h: Harness;
 
@@ -590,7 +591,7 @@ describe("认领和权限", () => {
     h = await makeHarness({ owner: false });
     const { createClaim } = await import("../src/core/setup.ts");
     const code = await createClaim(h.app);
-    h.clock.now += 601;
+    h.clock.now += 7 * 86_400 + 1;
     await h.fromUser(OWNER, `/start claim_${code}`);
     expect(h.tg.textsTo(OWNER).at(-1)).toContain("已失效");
     expect(h.app.settings.ownerId).toBeNull();
@@ -1152,7 +1153,7 @@ describe("管理面板：不打命令也能管理", () => {
     });
 
     it("超过时限按钮失效，也不再显示", async () => {
-      h.clock.now += 601;
+      h.clock.now += 7 * 86_400 + 1;
       await h.press(ALICE, ALICE, 9, RIGHT);
       await h.send({});
       expect(h.app.settings.ownerId).toBeNull();
@@ -1176,6 +1177,41 @@ describe("管理面板：不打命令也能管理", () => {
       expect(h.tg.textsTo(OWNER).at(-1)).toContain("已被更换");
     });
 
+    it("朋友模式：谁先点算谁，一个按钮，不用图案和链接", async () => {
+      await createClaim(h.app, { mode: "open" });
+      await h.fromUser(ALICE, "你好");
+      expect(labels(h.tg.last("sendMessage"))).toEqual(["👑 成为管理员"]);
+      await h.press(ALICE, ALICE, 9, dataOf(h.tg.last("sendMessage"), "成为管理员"));
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(ALICE);
+      expect(h.app.settings.ownerName).toContain("用户2001");
+      await h.press(BOB, BOB, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(ALICE);
+    });
+
+    it("指定用户名：只有他看得到按钮，别人点了也没用，大小写不敏感", async () => {
+      await createClaim(h.app, { mode: "user", user: "u2001" });
+      await h.fromUser(BOB, "/start");
+      expect(h.tg.textsTo(BOB).join()).not.toContain("成为管理员");
+      await h.press(BOB, BOB, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBeNull();
+      await h.fromUser(ALICE, "/start");
+      expect(labels(h.tg.last("sendMessage"))).toEqual(["👑 成为管理员"]);
+      await h.press(ALICE, ALICE, 9, "claim");
+      await h.send({});
+      expect(h.app.settings.ownerId).toBe(ALICE);
+    });
+
+    it("第一次绑定 7 天内有效；已有管理员时的换人链接只有 10 分钟", async () => {
+      await createClaim(h.app, { mode: "open" });
+      expect(h.app.settings.claimExpiresAt).toBe(h.clock.now + 7 * 86_400);
+      await h.set("ownerId", OWNER);
+      await createClaim(h.app);
+      expect(h.app.settings.claimExpiresAt).toBe(h.clock.now + 600);
+    });
+
     it("群里的按钮不算", async () => {
       await h.press(ALICE, GROUP, 9, RIGHT);
       await h.send({});
@@ -1197,5 +1233,25 @@ describe("管理面板：不打命令也能管理", () => {
       expect(logged.some((item) => item.startsWith("已绑定管理员"))).toBe(true);
       for (const item of logged) expect(item).not.toMatch(/\p{Cc}/u);
     });
+  });
+});
+
+describe("验证题：10 以内加减，三个选项", () => {
+  it("随机生成一千次，答案在 0 到 10 之间，三个选项不重复且含正确答案", () => {
+    for (let index = 0; index < 1000; index++) {
+      const challenge = makeChallenge(cryptoRng);
+      const match = /^(\d+) ([+-]) (\d+) 等于几？$/.exec(challenge.question);
+      if (!match) throw new Error(`题目格式不对：${challenge.question}`);
+      const [a, b] = [Number(match[1]), Number(match[3])];
+      const answer = match[2] === "+" ? a + b : a - b;
+      expect(String(answer)).toBe(challenge.correct);
+      expect(answer).toBeGreaterThanOrEqual(0);
+      expect(answer).toBeLessThanOrEqual(10);
+      expect(a).toBeLessThanOrEqual(10);
+      expect(b).toBeLessThanOrEqual(10);
+      expect(new Set(challenge.options).size).toBe(3);
+      expect(challenge.options).toContain(challenge.correct);
+      for (const option of challenge.options) expect(Number(option)).toBeGreaterThanOrEqual(0);
+    }
   });
 });

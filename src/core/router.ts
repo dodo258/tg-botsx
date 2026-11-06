@@ -60,7 +60,7 @@ async function routeMessage(app: App, message: Message): Promise<void> {
     const user = message.from;
     if (!user || user.is_bot) return;
     if (await tryClaim(app, message)) return;
-    if (firstClaimOpen(app)) {
+    if (firstClaimOpen(app, user)) {
       await sendClaimPrompt(app, chat.id);
       return;
     }

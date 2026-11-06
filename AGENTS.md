@@ -1,14 +1,17 @@
 # 项目地图
 
 ## 项目是什么
-传声筒：中文 Telegram 私人双向机器人，个人或小团队自部署，没有中心服务。同一台服务器可跑多个，每个一份目录、数据卷和 Token，数据互不相通。贴一个 Token、在机器人里点一下按钮就能部署到自己的服务器，消息不丢、不串、能自愈。
+传声筒：中文 Telegram 私人双向机器人，个人或小团队自部署，没有中心服务。一个进程跑多个机器人，每个一份目录、Token 文件和数据库，数据互不相通。网页管理只给部署的人用，看不到聊天内容。贴一个 Token、在机器人里点一下按钮就能部署到自己的服务器，消息不丢、不串、能自愈。
 
 ## 技术栈与目录
 TypeScript + Node 自带的 SQLite，运行时零依赖（`@grammyjs/types` 只用类型）。Node 直接跑 `.ts`，不需要构建。
 - `src/core/` — 业务代码，只依赖 `App` 接口
-- `src/runtime/node.ts` — 程序入口：长轮询和命令行
+- `src/runtime/node.ts` — 程序入口：命令行，按磁盘上的 Token 文件启停机器人
+- `src/runtime/runner.ts` — 跑一个机器人（长轮询、定时任务）
+- `src/runtime/fleet.ts` — 多机器人的增删查，命令行和网页共用
+- `src/runtime/web.ts`、`web-page.ts`、`tls.ts` — 网页管理（接口、页面、自签证书）
 - `src/runtime/sqlite-adapter.ts` — 数据库适配
-- `deploy/` — 安装脚本、`tgbot` 管理命令（默认机器人在 `/opt/tg-botsx`，`tgbot add 名字` 新增的在 `/opt/tg-botsx-名字`）
+- `deploy/` — 安装脚本、`tgbot` 管理命令（默认机器人的数据在 `/data/relay.db`，新增的在 `/data/bots/名字/`）
 - `test/relay.test.ts` — 业务场景测试；`test/e2e/` — 真实进程和安装流程测试
 - 模块职责和依赖方向见 `docs/specs/2026-11-06-v1.md`
 

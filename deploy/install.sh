@@ -8,14 +8,18 @@
 #   TGBOTSX_REPO        下载源码的仓库，默认 dodo258/tg-botsx
 #   TGBOTSX_SOURCE      用本地目录当源码，不下载
 #   TGBOTSX_DIR         安装目录，默认 /opt/tg-botsx
-#   TGBOTSX_NAME        机器人的名字，tgbot add 新增机器人时传入，只影响提示文字
+#   BOT_TOKENS          多个机器人的 Token，空格或换行分开；第一个是默认机器人
 #   TGBOTSX_YES=1       所有确认都按「是」
+#   WEB_PORT            网页管理的对外端口，不设置就随机取一个
+#   WEB_URL             网页管理的完整地址，用自己的域名时设置
 set -euo pipefail
 
 REPO="${TGBOTSX_REPO:-dodo258/tg-botsx}"
 BRANCH="${TGBOTSX_BRANCH:-main}"
 DIR="${TGBOTSX_DIR:-/opt/tg-botsx}"
-MANAGE="tgbot${TGBOTSX_NAME:+ $TGBOTSX_NAME}"
+MANAGE="tgbot"
+MORE_TOKENS=""
+WEB_FIRST_PASSWORD=""
 # 从 tgbot update 调用时可能继承 umask 077，程序文件必须让容器里的 node 用户读得到
 umask 022
 
@@ -97,6 +101,13 @@ fetch_source() {
 configure_token() {
   step "配置机器人"
   local env_file="$DIR/.env" token="${BOT_TOKEN:-}" reply attempts=0
+  if [ -n "${BOT_TOKENS:-}" ]; then
+    # shellcheck disable=SC2086
+    set -- $BOT_TOKENS
+    token="$1"
+    shift
+    MORE_TOKENS="$*"
+  fi
   if [ -z "$token" ] && [ -f "$env_file" ]; then
     token="$(sed -n 's/^BOT_TOKEN=//p' "$env_file" | head -n 1)"
     [ -n "$token" ] && say "沿用现有配置里的 Token。"
@@ -104,8 +115,13 @@ configure_token() {
   while :; do
     if [ -z "$token" ]; then
       say "还没有机器人的话：在 Telegram 打开 @BotFather，发 /newbot，按提示取名，它会给你一串 Token。"
-      read -r -s -p "粘贴 Bot Token（输入时不显示）: " token < /dev/tty || die "读不到输入。可以用 BOT_TOKEN=xxx 环境变量运行。"
-      printf '\n'
+      say "粘贴 Bot Token（输入时不显示），可以一次粘贴多个，一行一个，粘贴完再按一次回车："
+      local line
+      while IFS= read -r -s line < /dev/tty; do
+        [ -n "$line" ] || break
+        if [ -z "$token" ]; then token="$line"; else MORE_TOKENS="$MORE_TOKENS $line"; fi
+      done
+      [ -n "$token" ] || die "读不到输入。可以用 BOT_TOKEN=xxx 环境变量运行。"
     fi
     reply="$(call_get_me "$token" || true)"
     case "$reply" in
@@ -128,7 +144,7 @@ configure_token() {
     esac
     attempts=$((attempts + 1))
     [ "$attempts" -ge 3 ] && die "试了 3 次都不行。解决后重新运行这个脚本，已有的文件不会丢。"
-    [ -n "${BOT_TOKEN:-}" ] && die "环境变量里的 BOT_TOKEN 不可用。"
+    [ -n "${BOT_TOKEN:-}${BOT_TOKENS:-}" ] && die "环境变量里的 Token 不可用。"
     token=""
   done
   (
@@ -150,8 +166,59 @@ configure_token() {
   )
 }
 
+# 网页管理的端口。已有的不换，重复安装后地址不变；随机取，避开常见端口
+ensure_web_config() {
+  local env_file="$DIR/.env" port
+  (
+    umask 077
+    if ! grep -q '^WEB_PORT=' "$env_file"; then
+      port="${WEB_PORT:-$(( ( $(od -An -N2 -tu2 /dev/urandom) % 40000 ) + 20000 ))}"
+      printf 'WEB_PORT=%s\n' "$port" >> "$env_file"
+    fi
+    if [ -n "${WEB_URL:-}" ] && ! grep -q '^WEB_URL=' "$env_file"; then
+      printf 'WEB_URL=%s\n' "$WEB_URL" >> "$env_file"
+    fi
+    chmod 600 "$env_file"
+  )
+}
+
+# 第一次安装随机生成账号密码，只显示这一次。数据卷里已有账号时不动
+ensure_web_login() {
+  local compose_exec=(docker compose exec -T bot)
+  if (cd "$DIR" && "${compose_exec[@]}" test -f /data/web/auth.json </dev/null); then
+    return 0
+  fi
+  local password
+  password="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+  printf 'admin\n%s\n' "$password" | (cd "$DIR" && "${compose_exec[@]}" node --disable-warning=ExperimentalWarning src/runtime/node.ts web-auth) >/dev/null
+  WEB_FIRST_PASSWORD="$password"
+}
+
+add_more_bots() {
+  [ -n "$MORE_TOKENS" ] || return 0
+  step "添加其他机器人"
+  local token
+  for token in $MORE_TOKENS; do
+    printf '%s\n' "$token" | (cd "$DIR" && docker compose exec -T bot node --disable-warning=ExperimentalWarning src/runtime/node.ts add) || say "这个 Token 没加上，看上面的原因。"
+  done
+  say "把机器人的用户名发给要用的人，对方私聊机器人，点「成为管理员」就好了。"
+}
+
+show_web() {
+  step "网页管理"
+  TGBOTSX_DIR="$DIR" /usr/local/bin/tgbot web || say "取不到网页管理地址，稍后运行 tgbot web。"
+  if [ -n "${WEB_FIRST_PASSWORD:-}" ]; then
+    say "账号：admin"
+    say "密码：$WEB_FIRST_PASSWORD"
+    say "密码只显示这一次。要改成自己的，运行 tgbot web-password，或登录后在网页里改。"
+  else
+    say "登录用你之前设的账号密码，忘了运行 tgbot web-password 重设。"
+  fi
+}
+
 start_bot() {
   step "启动机器人"
+  ensure_web_config
   (cd "$DIR" && docker compose up -d --build --remove-orphans) || die "启动失败，请看上面的报错。"
   local waited=0
   until (cd "$DIR" && docker compose logs bot 2>/dev/null | grep -q '已连接'); do
@@ -177,7 +244,7 @@ show_claim() {
   local username pair
   pair="$(printf '%s\n' "$logs" | grep -o '配对图案：.*' | tail -n 1 | sed 's/^配对图案：//' | tr -d '[:cntrl:]' || true)"
   username="$(printf '%s' "$link" | sed -n 's#^https://t.me/\([^?]*\)?.*#\1#p')"
-  say "用你要当管理员的 Telegram 账号打开 @$username，点「开始」，再点和下面一样的图案（10 分钟内有效）："
+  say "用你要当管理员的 Telegram 账号打开 @$username，点「开始」，再点和下面一样的图案（7 天内有效）："
   say ""
   say "  配对图案：$pair"
   say "  机器人：https://t.me/$username"
@@ -189,12 +256,12 @@ show_claim() {
 
 # 按钮谁都能看到，让部署的人亲眼看到是谁绑定的。没有终端（脚本部署）时不等
 wait_for_owner() {
-  [ -t 1 ] || return 0
+  [ -t 1 ] && [ -z "$MORE_TOKENS" ] || return 0
   say ""
   say "等你点图案…不想等可以按 Ctrl+C，机器人不受影响。"
   local waited=0 who logs_now
   while [ "$waited" -lt 600 ]; do
-    logs_now="$(cd "$DIR" && docker compose logs --no-log-prefix bot 2>/dev/null || true)"
+    logs_now="$( (cd "$DIR" && docker compose logs --no-log-prefix bot 2>/dev/null) || true)"
     who="$(printf '%s\n' "$logs_now" | grep -o '已绑定管理员：.*' | tail -n 1 | tr -d '[:cntrl:]' || true)"
     if [ -z "$who" ] && printf '%s\n' "$logs_now" | grep -q '绑定按钮已失效'; then
       say "有人点错了图案，按钮已失效。如果不是你点的，说明有人在抢这个机器人。用上面的链接绑定，或运行 $MANAGE claim 换新图案。"
@@ -208,7 +275,7 @@ wait_for_owner() {
     sleep 3
     waited=$((waited + 3))
   done
-  say "10 分钟内没有人绑定，运行 $MANAGE claim 重新生成。"
+  say "还没有人绑定，机器人继续等。以后运行 $MANAGE list 查看。"
 }
 
 main() {
@@ -220,6 +287,9 @@ main() {
   configure_token
   fetch_source
   start_bot
+  ensure_web_login
+  add_more_bots
+  show_web
   show_claim
   step "装好了"
   say "以后管理机器人运行：$MANAGE"

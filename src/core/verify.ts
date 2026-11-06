@@ -31,12 +31,6 @@ export interface Challenge {
   options: string[];
 }
 
-export function pick<T>(rng: Rng, items: readonly T[]): T {
-  const item = items[rng.int(0, items.length - 1)];
-  if (item === undefined) throw new Error("不能从空列表里取值");
-  return item;
-}
-
 export function shuffle<T>(rng: Rng, items: readonly T[]): T[] {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i--) {
@@ -50,59 +44,12 @@ export function shuffle<T>(rng: Rng, items: readonly T[]): T[] {
   return copy;
 }
 
-function numberOptions(rng: Rng, answer: number): string[] {
-  const values = new Set<number>([answer]);
-  const deltas = shuffle(rng, [-5, -3, -2, -1, 1, 2, 3, 5]);
-  for (const delta of deltas) {
-    if (values.size >= 6) break;
-    if (answer + delta >= 0) values.add(answer + delta);
-  }
-  return [...values].map(String);
-}
-
-const SYMBOLS = ["🍎", "⭐", "🐱", "🌙", "🌸", "🍋", "🐟", "🍄"];
-const ODD_PAIRS: readonly (readonly [string, string])[] = [
-  ["🐶", "🐺"],
-  ["🍎", "🍅"],
-  ["🌕", "🌑"],
-  ["😀", "😎"],
-  ["🐱", "🐯"],
-];
-
-const GENERATORS: readonly ((rng: Rng) => Challenge)[] = [
-  // 数数：比算术更难被通用脚本解析，人看一眼就会
-  (rng) => {
-    const symbol = pick(rng, SYMBOLS);
-    const noise = pick(rng, SYMBOLS.filter((item) => item !== symbol));
-    const count = rng.int(3, 8);
-    const items = shuffle(rng, [...Array<string>(count).fill(symbol), ...Array<string>(rng.int(2, 4)).fill(noise)]);
-    return { question: `下面有几个 ${symbol}？\n\n${items.join(" ")}`, correct: String(count), options: numberOptions(rng, count) };
-  },
-  (rng) => {
-    const pair = pick(rng, ODD_PAIRS);
-    const position = rng.int(1, 6);
-    const items = Array.from({ length: 6 }, (_, index) => (index + 1 === position ? pair[1] : pair[0]));
-    return {
-      question: `从左往右数，第几个和别的不一样？\n\n${items.join(" ")}`,
-      correct: String(position),
-      options: ["1", "2", "3", "4", "5", "6"],
-    };
-  },
-  (rng) => {
-    const a = rng.int(11, 39);
-    const b = rng.int(2, 19);
-    return { question: `${a} + ${b} 等于几？`, correct: String(a + b), options: numberOptions(rng, a + b) };
-  },
-  (rng) => {
-    const pair = shuffle(rng, SYMBOLS).slice(0, 2);
-    const first = pair[0] ?? "🍎";
-    const second = pair[1] ?? "🍋";
-    const others = SYMBOLS.filter((item) => item !== first && item !== second).slice(0, 4);
-    return { question: `接下来该是哪一个？\n\n${first} ${second} ${first} ${second} ${first} ？`, correct: second, options: [first, second, ...others] };
-  },
-];
-
+/** 10 以内加减，三个选项。只为挡刷屏脚本和手滑，人一眼就会；结果不会是负数。 */
 export function makeChallenge(rng: Rng): Challenge {
-  const challenge = pick(rng, GENERATORS)(rng);
-  return { ...challenge, options: shuffle(rng, challenge.options) };
+  const plus = rng.int(0, 1) === 0;
+  const a = plus ? rng.int(1, 9) : rng.int(2, 10);
+  const b = plus ? rng.int(1, 10 - a) : rng.int(1, a - 1);
+  const answer = plus ? a + b : a - b;
+  const wrong = shuffle(rng, [-3, -2, -1, 1, 2, 3].map((delta) => answer + delta).filter((value) => value >= 0 && value <= 10)).slice(0, 2);
+  return { question: `${a} ${plus ? "+" : "-"} ${b} 等于几？`, correct: String(answer), options: shuffle(rng, [answer, ...wrong]).map(String) };
 }

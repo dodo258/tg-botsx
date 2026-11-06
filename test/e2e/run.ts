@@ -2,7 +2,8 @@
 // 运行：npm run e2e
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFakeTelegram } from "./fake-telegram.ts";
@@ -11,6 +12,7 @@ import type { FakeServer } from "./fake-telegram.ts";
 const TOKEN = "123456:TEST_TOKEN_for_e2e";
 const OWNER = 1000;
 const ALICE = 2001;
+const BOB = 2002;
 let failures = 0;
 
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -86,6 +88,52 @@ async function testNode(fake: FakeServer): Promise<void> {
     await waitFor("生成认领链接", () => claimProcess.exitCode !== null);
     check("claim 命令能重新生成链接", claimProcess.exitCode === 0 && claimProcessLog.join("").includes("start=claim_"), claimProcessLog.join(""));
 
+    // 同一个进程再加两个机器人：不重启就生效，数据各在各的文件里
+    const SHOP = "222222:SHOP_TOKEN_for_e2e";
+    const TEAM = "333333:TEAM_TOKEN_for_e2e";
+    const shop = fake.addBot(SHOP, "shop_bot");
+    const team = fake.addBot(TEAM, "team_bot");
+    const addVia = async (token: string, ...args: string[]) => {
+      const out: string[] = [];
+      const child = spawn("node", [entry, "add", ...args], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+      child.stdout.on("data", (chunk: Buffer) => out.push(chunk.toString()));
+      child.stderr.on("data", (chunk: Buffer) => out.push(chunk.toString()));
+      child.stdin.end(`${token}\n`);
+      await waitFor("add 结束", () => child.exitCode !== null);
+      return { code: child.exitCode, out: out.join("") };
+    };
+    const added = await addVia(SHOP);
+    check("add 用机器人的用户名起名", added.code === 0 && added.out.includes("shop-bot") && !added.out.includes(SHOP), added.out);
+    const duplicate = await addVia(SHOP);
+    check("同一个 Token 不能加两次", duplicate.code === 1 && duplicate.out.includes("已经给「shop-bot」用了"), duplicate.out);
+    const sameAsDefault = await addVia(TOKEN);
+    check("默认机器人的 Token 也不能再加", sameAsDefault.code === 1 && sameAsDefault.out.includes("已经给「默认」用了"), sameAsDefault.out);
+    const invalid = await addVia("999999:not_a_real_token_x");
+    check("无效 Token 报中文原因", invalid.code === 1 && invalid.out.includes("不认这个 Token"), invalid.out);
+    check("加第二个", (await addVia(TEAM, "team", "someone")).code === 0);
+    check("进程不重启就开始跑新机器人", await waitFor("新机器人连接", () => secondLog.join("").includes("已连接 @shop_bot") && secondLog.join("").includes("已连接 @team_bot")));
+
+    shop.queue.push(textUpdate(ALICE, "你好", 11));
+    check("朋友私聊看到成为管理员按钮", await waitFor("按钮", () => shop.named("sendMessage").some((m) => m.chat_id === ALICE && String(m.text).includes("还没有管理员"))));
+    team.queue.push(textUpdate(ALICE, "你好", 12));
+    await sleep(800);
+    check("指定了用户名的机器人不给别人按钮", !team.named("sendMessage").some((m) => String(m.text).includes("还没有管理员")));
+    shop.queue.push({ update_id: updateId++, callback_query: { id: "c", from: { id: ALICE, is_bot: false, first_name: "朋友" }, chat_instance: "x", data: "claim", message: { message_id: 50, date: 1, chat: { id: ALICE, type: "private" } } } });
+    check("朋友点一下成为管理员", await waitFor("朋友绑定", () => shop.named("sendMessage").some((m) => String(m.text).includes("绑定成功"))));
+    check("朋友绑定不影响默认机器人的管理员", !fake.named("sendMessage").some((m) => m.chat_id === ALICE && String(m.text).includes("绑定成功")));
+    const listOut: string[] = [];
+    const lister = start("node", [entry, "list"], env, listOut);
+    await waitFor("list", () => lister.exitCode !== null);
+    check("list 列出三个并显示绑定状态", /默认\t@demo_bot/.test(listOut.join("")) && /shop-bot\t@shop_bot\t已绑定 朋友/.test(listOut.join("")) && /team\t@team_bot\t等 @someone 绑定/.test(listOut.join("")), listOut.join(""));
+    check("数据文件是分开的", existsSync(join(dataDir, "bots", "shop-bot", "relay.db")) && existsSync(join(dataDir, "bots", "team", "relay.db")));
+    const removed = start("node", [entry, "remove", "team"], env, []);
+    await waitFor("remove", () => removed.exitCode !== null);
+    check("删除一个不影响其他", removed.exitCode === 0 && !existsSync(join(dataDir, "bots", "team")) && existsSync(join(dataDir, "bots", "shop-bot", "relay.db")));
+    await sleep(3500);
+    const callsAfterRemove = shop.calls.length;
+    shop.queue.push(textUpdate(BOB, "你好", 13));
+    check("删除后别的机器人照常工作", await waitFor("其他机器人", () => shop.calls.length > callsAfterRemove));
+
     const conflictFree = secondLog.join("");
     second.kill("SIGTERM");
     await waitFor("第二个进程退出", () => second.exitCode !== null, 8000);
@@ -97,7 +145,7 @@ async function testNode(fake: FakeServer): Promise<void> {
     check("Token 无效时报中文错误并退出", bad.exitCode === 1 && badLog.join("").includes("不认这个 Token"), badLog.join(""));
 
     const noneLog: string[] = [];
-    const none = start("node", [entry], { ...env, BOT_TOKEN: "" }, noneLog);
+    const none = start("node", [entry], { ...env, BOT_TOKEN: "", DATA_DIR: mkdtempSync(join(tmpdir(), "tg-botsx-none-")) }, noneLog);
     await waitFor("缺 Token 退出", () => none.exitCode !== null);
     check("没配 Token 时报中文错误并退出", none.exitCode === 1 && noneLog.join("").includes("没有配置 BOT_TOKEN"), noneLog.join(""));
   } finally {
@@ -106,8 +154,103 @@ async function testNode(fake: FakeServer): Promise<void> {
   }
 }
 
+async function testWeb(fake: FakeServer): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), "tg-botsx-web-"));
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const env = { BOT_TOKEN: "", DATA_DIR: dataDir, TELEGRAM_API_BASE: fake.url, WEB_LISTEN_PORT: String(port), NODE_NO_WARNINGS: "1" };
+  const entry = "src/runtime/node.ts";
+  const WEB_TOKEN = "444444:WEB_TOKEN_for_e2e_x";
+  const friend = fake.addBot(WEB_TOKEN, "friend_bot");
+  const log: string[] = [];
+  const node = start("node", [entry], env, log);
+  let cookie = "";
+  const call = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
+    new Promise<{ status: number; data: Record<string, unknown>; raw: string; setCookie: string }>((resolve, reject) => {
+      const payload = body === undefined ? undefined : JSON.stringify(body);
+      const req = httpsRequest({ host: "127.0.0.1", port, path, method, rejectUnauthorized: false, headers: { ...(payload ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}), ...headers } }, (res) => {
+        let raw = "";
+        res.on("data", (chunk: Buffer) => (raw += chunk.toString()));
+        res.on("end", () => {
+          let data: Record<string, unknown> = {};
+          try {
+            data = JSON.parse(raw) as Record<string, unknown>;
+          } catch {
+            // 页面不是 JSON
+          }
+          resolve({ status: res.statusCode ?? 0, data, raw, setCookie: String(res.headers["set-cookie"]?.[0] ?? "") });
+        });
+      });
+      req.on("error", reject);
+      req.end(payload);
+    });
+  try {
+    check("没配机器人也能启动网页", await waitFor("网页启动", () => log.join("").includes("网页管理已启动")), log.join(""));
+    const page = await call("GET", "/");
+    check("页面能打开，是 HTTPS", page.status === 200 && page.raw.includes("传声筒"));
+    check("没登录拿不到机器人列表", (await call("GET", "/api/bots")).status === 401);
+    check("还没设账号时不能登录", (await call("POST", "/api/login", { user: "a", password: "b" })).status === 503);
+
+    const auth = spawn("node", [entry, "web-auth"], { env: { ...process.env, ...env }, stdio: ["pipe", "ignore", "ignore"] });
+    auth.stdin.end("tester\nlocal-e2e-password\n");
+    await waitFor("设置账号", () => auth.exitCode !== null);
+    check("账号文件没有明文密码", !readFileSync(join(dataDir, "web", "auth.json"), "utf8").includes("local-e2e-password"));
+    const denied = await call("POST", "/api/login", { user: "tester", password: "wrong-password" });
+    check("密码不对不能登录", denied.status === 401 && denied.setCookie === "");
+    const login = await call("POST", "/api/login", { user: "tester", password: "local-e2e-password" });
+    check("登录成功，Cookie 带安全属性", login.status === 200 && /HttpOnly; Secure; SameSite=Strict/.test(login.setCookie), login.setCookie);
+    cookie = login.setCookie.split(";")[0] ?? "";
+
+    check("跨站来源的写操作被拒绝", (await call("POST", "/api/bots", { tokens: WEB_TOKEN }, { origin: "https://evil.example" })).status === 403);
+    const added = await call("POST", "/api/bots", { tokens: `${WEB_TOKEN}\n999:bad` });
+    const results = added.data.results as { ok: boolean }[];
+    check("一次粘贴多个，好的加上，坏的说原因", results.length === 2 && results[0]?.ok === true && results[1]?.ok === false, added.raw);
+    check("响应里没有 Token", !added.raw.includes(WEB_TOKEN));
+    check("新机器人不用重启就连上", await waitFor("连接", () => log.join("").includes("已连接 @friend_bot")));
+    const listed = await call("GET", "/api/bots");
+    check("列表里没有 Token", listed.status === 200 && !listed.raw.includes(WEB_TOKEN) && listed.raw.includes("friend_bot"), listed.raw);
+
+    friend.queue.push(textUpdate(ALICE, "你好", 21));
+    check("朋友私聊看到按钮", await waitFor("按钮", () => friend.named("sendMessage").some((m) => String(m.text).includes("还没有管理员"))));
+    friend.queue.push({ update_id: updateId++, callback_query: { id: "c", from: { id: ALICE, is_bot: false, first_name: "朋友", username: "alice" }, chat_instance: "x", data: "claim", message: { message_id: 50, date: 1, chat: { id: ALICE, type: "private" } } } });
+    await waitFor("绑定", () => friend.named("sendMessage").some((m) => String(m.text).includes("绑定成功")));
+    const after = await call("GET", "/api/bots");
+    check("网页能看到是谁绑定的", after.raw.includes("朋友") && after.raw.includes('"bound":true'), after.raw);
+
+    const bad = await call("POST", "/api/bots/friend-bot/assign", { user: "not valid!" });
+    const still = await call("GET", "/api/bots");
+    check("用户名不对时不会把现有管理员清掉", bad.status === 400 && still.raw.includes('"bound":true'), bad.raw);
+    const assign = await call("POST", "/api/bots/friend-bot/assign", { user: "@ZhangSan" });
+    check("网页能重新指定管理员", assign.status === 200 && assign.data.claimUser === "zhangsan" && assign.data.bound === false, assign.raw);
+    await sleep(200);
+    friend.calls.length = 0;
+    friend.queue.push(textUpdate(BOB, "你好", 22));
+    await sleep(700);
+    check("指定后别人看不到按钮", !friend.named("sendMessage").some((m) => String(m.text).includes("还没有管理员")));
+
+    const saved = await call("POST", "/api/bots/friend-bot/settings", { welcome: "朋友的欢迎语", verify: false });
+    check("网页能改欢迎语和验证开关", saved.data.welcome === "朋友的欢迎语" && saved.data.verify === false, saved.raw);
+    check("删不存在的机器人报错", (await call("DELETE", "/api/bots/nope")).status === 404);
+    check("路径穿越被挡住", (await call("DELETE", "/api/bots/..%2F..%2Fweb")).status === 404);
+    const deleted = await call("DELETE", "/api/bots/friend-bot");
+    check("网页能删除机器人", deleted.status === 200 && !existsSync(join(dataDir, "bots", "friend-bot")));
+
+    const wrongCurrent = await call("POST", "/api/password", { current: "nope-nope", password: "another-password" });
+    check("改密码要当前密码", wrongCurrent.status === 400);
+    const logout = await call("POST", "/api/logout");
+    cookie = "";
+    check("退出后不能再用", logout.status === 200 && (await call("GET", "/api/bots")).status === 401);
+    for (let i = 0; i < 5; i++) await call("POST", "/api/login", { user: "tester", password: "wrong-password" });
+    check("连错 5 次被锁", (await call("POST", "/api/login", { user: "tester", password: "local-e2e-password" })).status === 429);
+    check("日志里没有 Token 和密码", !log.join("").includes(WEB_TOKEN) && !log.join("").includes("local-e2e-password"));
+  } finally {
+    node.kill("SIGKILL");
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
 const fake = await startFakeTelegram(TOKEN);
 await testNode(fake);
+await testWeb(fake);
 await fake.close();
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

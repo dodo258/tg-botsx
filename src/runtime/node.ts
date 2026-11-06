@@ -1,22 +1,27 @@
-// 程序入口：长轮询，不需要公网地址和域名。
-//   node src/runtime/node.ts          运行
-//   node src/runtime/node.ts claim    生成认领链接
-//   node src/runtime/node.ts backup 目标文件   在线备份数据库
-import { mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import type { Update } from "@grammyjs/types";
+// 程序入口：长轮询，一个进程跑一台服务器上的所有机器人。
+//   node src/runtime/node.ts                    运行
+//   node src/runtime/node.ts claim [名字]        重新生成绑定方式
+//   node src/runtime/node.ts backup 目标 [名字]   在线备份数据库
+//   node src/runtime/node.ts add [名字]          从标准输入读 Token，新增机器人
+//   node src/runtime/node.ts remove 名字         删除机器人和它的数据
+//   node src/runtime/node.ts token 名字          从标准输入读 Token，更换
+//   node src/runtime/node.ts list               列出所有机器人
+//   node src/runtime/node.ts web-auth           从标准输入读两行：账号、密码，设置网页登录
+import { existsSync, mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import type { App } from "../core/app.ts";
-import { tick } from "../core/maintenance.ts";
-import { handleUpdate, isUpdate } from "../core/router.ts";
-import { migrate } from "../core/schema.ts";
 import { loadSettings } from "../core/settings.ts";
-import { ALLOWED_UPDATES, claimLink, createClaim, fetchBot, syncCommands } from "../core/setup.ts";
-import { createTelegram, TelegramError } from "../core/telegram.ts";
+import { claimLink, createClaim, fetchBot } from "../core/setup.ts";
+import { createTelegram } from "../core/telegram.ts";
 import { cryptoRng } from "../core/verify.ts";
+import { addBot, allNames, dbPath, DEFAULT_NAME, describeBot, extraNames, readToken, removeBot, replaceToken } from "./fleet.ts";
+import type { BotInfo, FleetEnv } from "./fleet.ts";
+import { startBot } from "./runner.ts";
+import type { RunningBot } from "./runner.ts";
 import { sqliteDb } from "./sqlite-adapter.ts";
+import { setAuth, startWeb } from "./web.ts";
 
-const POLL_TIMEOUT_SECONDS = 30;
-const TICK_INTERVAL_MS = 20_000;
+const SCAN_INTERVAL_MS = 3000;
 
 function fail(message: string): never {
   console.error(message);
@@ -24,154 +29,173 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
-const token = process.env.BOT_TOKEN?.trim();
-if (!token) fail("没有配置 BOT_TOKEN。到 @BotFather 拿到 Token，写进 .env 后再启动。");
-
 const dataDir = resolve(process.env.DATA_DIR ?? "./data");
 mkdirSync(dataDir, { recursive: true });
-const dbFile = join(dataDir, "relay.db");
-const db = sqliteDb(dbFile);
-await migrate(db);
+const env: FleetEnv = { dataDir, apiBase: process.env.TELEGRAM_API_BASE, defaultToken: process.env.BOT_TOKEN?.trim() };
 
-const apiBase = process.env.TELEGRAM_API_BASE;
-const tg = createTelegram({ token, apiBase, maxRetryAfter: 30 });
-const pollClient = createTelegram({ token, apiBase, timeoutMs: (POLL_TIMEOUT_SECONDS + 15) * 1000 });
+async function printClaim(app: App, username: string): Promise<void> {
+  const s = app.settings;
+  const link = claimLink(username, s.claimCode);
+  if (s.ownerId !== null) {
+    console.log(`\n用新管理员的账号打开这个链接并点开始（10 分钟内有效）：\n${link}\n`);
+    return;
+  }
+  const pair = s.claimPair ? `再点和这个一样的图案：\n配对图案：${s.claimPair}\n` : "配对按钮已失效，用下面的链接。\n";
+  console.log(`\n用要当管理员的账号打开 @${username}，点开始，${pair}也可以直接打开这个链接，不用点图案：\n${link}\n`);
+}
 
-const pending = new Set<Promise<void>>();
+function readStdin(): Promise<string[]> {
+  return new Promise((done) => {
+    let text = "";
+    process.stdin.on("data", (chunk: Buffer) => (text += chunk.toString()));
+    process.stdin.on("end", () => done(text.split("\n").map((line) => line.trim())));
+  });
+}
 
-async function buildApp(): Promise<App> {
-  return {
+const readStdinLine = async () => (await readStdin())[0] ?? "";
+
+function infoLine(info: BotInfo): string {
+  const state = info.bound ? `已绑定 ${info.ownerName || ""}`.trim() : info.claimOpen ? (info.claimMode === "user" ? `等 @${info.claimUser} 绑定` : info.claimMode === "pair" ? `等人绑定，配对图案 ${info.claimPair || "已失效"}` : "等人绑定") : "绑定已过期";
+  return [info.name, info.username ? `@${info.username}` : "-", state].join("\t");
+}
+
+async function cliClaim(name: string): Promise<void> {
+  if (!allNames(env).includes(name)) fail(`没有叫 ${name} 的机器人。`);
+  const db = sqliteDb(dbPath(env, name));
+  const app: App = {
     db,
-    tg,
+    tg: createTelegram({ token: readToken(env, name), apiBase: env.apiBase }),
     settings: await loadSettings(db),
     rng: cryptoRng,
     now: () => Math.floor(Date.now() / 1000),
     nowMs: () => Date.now(),
-    defer(task, delayMs) {
-      const job = new Promise<void>((done) => setTimeout(done, delayMs))
-        .then(task)
-        .catch((error: unknown) => {
-          console.error("后台任务失败：", error instanceof Error ? error.message : String(error));
-        })
-        .finally(() => pending.delete(job));
-      pending.add(job);
-    },
-    log(level, message, detail) {
-      const line = `${new Date().toISOString()} ${level === "error" ? "错误" : level === "warn" ? "警告" : "信息"} ${message}${detail === undefined ? "" : `：${String(detail)}`}`;
-      if (level === "error") console.error(line);
-      else console.log(line);
-    },
+    defer: () => undefined,
+    log: () => undefined,
   };
-}
-
-async function printClaim(app: App, username: string): Promise<void> {
-  const code = await createClaim(app);
-  if (app.settings.ownerId === null) {
-    console.log(`\n用要当管理员的账号打开 @${username}，点开始，再点和这个一样的图案（10 分钟内有效）：\n配对图案：${app.settings.claimPair}\n也可以直接打开这个链接，不用点图案：\n${claimLink(username, code)}\n`);
-  } else {
-    console.log(`\n用新管理员的账号打开这个链接并点开始（10 分钟内有效）：\n${claimLink(username, code)}\n`);
-  }
+  const bot = await fetchBot(app).catch(() => fail("Telegram 不认这个 Token，或连不上 Telegram。"));
+  await createClaim(app);
+  await printClaim(app, bot.username);
+  db.close();
 }
 
 const command = process.argv[2];
+const arg1 = process.argv[3];
+const arg2 = process.argv[4];
 
-if (command === "claim") {
-  const app = await buildApp();
-  const bot = await fetchBot(app).catch(() => fail("Telegram 不认这个 Token，或连不上 Telegram。"));
-  await printClaim(app, bot.username);
-  db.close();
-  process.exit(0);
-}
-
-if (command === "backup") {
-  const target = process.argv[3];
-  if (!target) fail("用法：backup 目标文件路径");
-  db.vacuumInto(resolve(target));
-  console.log(`已备份到 ${resolve(target)}`);
-  db.close();
-  process.exit(0);
-}
-
-if (command !== undefined) fail(`不认识的命令：${command}。可用：claim、backup`);
-
-let stopping = false;
-let handling = false;
-let timer: ReturnType<typeof setInterval> | undefined;
-
-async function shutdown(): Promise<void> {
-  clearInterval(timer);
-  await Promise.allSettled([...pending]);
-  db.close();
-  console.log("已停止。");
-  process.exit(0);
-}
-
-function stop(): void {
-  if (stopping) return;
-  stopping = true;
-  console.log("正在停止…");
-  // 正在等长轮询时可以直接退出：没确认的更新下次还会收到，也有去重兜底
-  if (!handling) void shutdown();
-}
-process.on("SIGTERM", stop);
-process.on("SIGINT", stop);
-
-const startup = await buildApp();
-let bot: { username: string };
-try {
-  // 这个 Token 以前被别的程序设过 Webhook 的话要先删，否则长轮询会报 409
-  await tg.call("deleteWebhook", { drop_pending_updates: false });
-  bot = await fetchBot(startup);
-  await syncCommands(startup);
-} catch (error) {
-  if (error instanceof TelegramError && error.code === 401) fail("Telegram 不认这个 Token（401）。到 @BotFather 核对后改 .env。");
-  fail(`启动失败，连不上 Telegram：${error instanceof Error ? error.message : String(error)}\n服务器在国内的话需要代理，见 README。`);
-}
-console.log(`已连接 @${bot.username}，数据在 ${dbFile}`);
-if (startup.settings.ownerId === null) await printClaim(startup, bot.username);
-
-let ticking = false;
-timer = setInterval(() => {
-  if (ticking) return;
-  ticking = true;
-  buildApp()
-    .then((app) => tick(app))
-    .catch((error: unknown) => {
-      console.error("定时任务失败：", error instanceof Error ? error.message : String(error));
-    })
-    .finally(() => {
-      ticking = false;
-    });
-}, TICK_INTERVAL_MS);
-
-let offset = 0;
-let backoff = 1000;
-const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
-
-while (!stopping) {
+if (command !== undefined) {
   try {
-    const updates = await pollClient.call<unknown[]>("getUpdates", { offset, timeout: POLL_TIMEOUT_SECONDS, allowed_updates: ALLOWED_UPDATES });
-    backoff = 1000;
-    for (const raw of updates) {
-      if (!isUpdate(raw)) continue;
-      const update: Update = raw;
-      offset = update.update_id + 1;
-      handling = true;
-      await handleUpdate(await buildApp(), update);
-      handling = false;
+    switch (command) {
+      case "claim":
+        await cliClaim(arg1 ?? DEFAULT_NAME);
+        break;
+      case "backup": {
+        if (!arg1) fail("用法：backup 目标文件路径 [名字]");
+        const db = sqliteDb(dbPath(env, arg2 ?? DEFAULT_NAME));
+        db.vacuumInto(resolve(arg1));
+        console.log(`已备份到 ${resolve(arg1)}`);
+        db.close();
+        break;
+      }
+      case "add": {
+        const info = await addBot(env, await readStdinLine(), { name: arg1, claimUser: arg2 });
+        console.log(infoLine(info));
+        break;
+      }
+      case "remove":
+        removeBot(env, arg1 ?? "");
+        console.log(`已删除 ${arg1}`);
+        break;
+      case "token":
+        await replaceToken(env, arg1 ?? "", await readStdinLine());
+        console.log("已更换，几秒后生效。");
+        break;
+      case "token-check": {
+        const token = await readStdinLine();
+        console.log(allNames(env).some((name) => name !== DEFAULT_NAME && readToken(env, name) === token) ? "used" : "free");
+        break;
+      }
+      case "web-auth": {
+        const [user = "", password = ""] = await readStdin();
+        setAuth(env, user, password);
+        console.log("网页登录已设置。");
+        break;
+      }
+      case "list":
+        for (const name of allNames(env)) console.log(infoLine(await describeBot(env, name)));
+        break;
+      default:
+        fail(`不认识的命令：${command}。可用：claim、backup、add、remove、token、list`);
     }
   } catch (error) {
-    if (stopping) break;
-    if (error instanceof TelegramError && error.code === 409) {
-      console.error("另一个程序正在用这个 Token 收消息。同一个 Token 只能跑一份，请停掉另一份。10 秒后重试。");
-      await sleep(10_000);
-      continue;
-    }
-    if (error instanceof TelegramError && error.code === 401) fail("Token 已失效（401）。到 @BotFather 拿新的，改 .env 后重启。");
-    console.error(`收消息失败，${backoff / 1000} 秒后重试：`, error instanceof Error ? error.message : String(error));
-    await sleep(backoff);
-    backoff = Math.min(backoff * 2, 60_000);
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  process.exit(0);
+}
+
+const webPort = Number(process.env.WEB_LISTEN_PORT ?? process.env.WEB_PORT ?? 0);
+// 开了网页就可以先不配机器人，部署好再到网页上加
+if (!env.defaultToken && extraNames(env).length === 0 && !webPort) {
+  fail("没有配置 BOT_TOKEN。到 @BotFather 拿到 Token，写进 .env 后再启动。");
+}
+
+const running = new Map<string, RunningBot>();
+let stopping = false;
+
+function launch(name: string, token: string): void {
+  const isDefault = name === DEFAULT_NAME;
+  running.set(
+    name,
+    startBot({
+      label: isDefault ? "" : name,
+      token,
+      dbFile: dbPath(env, name),
+      apiBase: env.apiBase,
+      async onConnected(app, username) {
+        // 重启不换绑定方式：已经告诉朋友的图案和链接要继续能用
+        if (app.settings.ownerId !== null) return;
+        if (app.settings.claimExpiresAt <= app.now() || !app.settings.claimCode) await createClaim(app, isDefault ? undefined : { mode: "open" });
+        if (isDefault) await printClaim(app, username);
+      },
+      onFatal(message) {
+        console.error(message);
+        // 只有默认一个机器人时直接退出，和以前一样让人一眼看到；有别的机器人时不能连累它们
+        if (isDefault && extraNames(env).length === 0) process.exit(1);
+      },
+    }),
+  );
+}
+
+/** 对照磁盘上的 Token 文件启停机器人，新增删除都不用重启进程。 */
+function scan(): void {
+  const wanted = new Map(allNames(env).map((name) => [name, readToken(env, name)]));
+  for (const [name, bot] of running) {
+    if (wanted.get(name) === bot.token) continue;
+    running.delete(name);
+    console.log(`停止机器人 ${name}`);
+    void bot.stop();
+  }
+  for (const [name, token] of wanted) {
+    if (!running.has(name)) launch(name, token);
   }
 }
 
-await shutdown();
+async function shutdown(): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  console.log("正在停止…");
+  clearInterval(scanner);
+  await Promise.allSettled([...running.values()].map((bot) => bot.stop()));
+  console.log("已停止。");
+  process.exit(0);
+}
+process.on("SIGTERM", () => void shutdown());
+process.on("SIGINT", () => void shutdown());
+
+scan();
+if (webPort) {
+  startWeb({ env, port: webPort, stateOf: (name) => running.get(name)?.state() ?? "stopped" });
+}
+console.log("传声筒已启动");
+const scanner = setInterval(() => {
+  if (existsSync(dataDir)) scan();
+}, SCAN_INTERVAL_MS);

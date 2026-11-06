@@ -113,73 +113,81 @@ check("卸载后数据卷还在", volumes.includes("tg-botsx_data"), volumes);
 const reinstall = await sudo("bash deploy/install.sh");
 check("重新安装后接着用旧数据", reinstall.code === 0 && reinstall.out.includes("已经绑定过管理员"), reinstall.out);
 
-// 同一台服务器再加一个机器人：用另一个假 Telegram 和另一个 Token，两边的调用记录天然分开
+// 同一台服务器再加一个机器人：同一个容器、同一个进程，数据在自己的文件里
 const OTHER_TOKEN = "654321:SECOND_BOT_TOKEN";
 const OTHER_NAME = "kehu-a";
-const OTHER_DIR = `${DIR}-${OTHER_NAME}`;
-const otherFake = await startFakeTelegram(OTHER_TOKEN, { host: "0.0.0.0", port: 19000, publicHost: hostIp });
+const other = fake.addBot(OTHER_TOKEN, "kehu_a_bot");
+const sqlInContainer = (code: string) => sudo(`cd ${DIR} && docker compose exec -T bot node --disable-warning=ExperimentalWarning --input-type=module -e "${code}"`);
 
 const badName = await sudo(`BOT_TOKEN=${OTHER_TOKEN} tgbot add 客户A`);
 check("不合法的名字被拒绝", badName.code !== 0 && badName.out.includes("小写英文"), badName.out);
 const reservedName = await sudo(`BOT_TOKEN=${OTHER_TOKEN} tgbot add list`);
 check("和命令同名的名字被拒绝", reservedName.code !== 0 && reservedName.out.includes("换一个名字"), reservedName.out);
 const sameToken = await sudo(`tgbot add ${OTHER_NAME}`);
-check("已被占用的 Token 被拒绝", sameToken.code !== 0 && sameToken.out.includes("已经给「默认」用了") && !existsSync(`${OTHER_DIR}/docker-compose.yml`), sameToken.out);
+check("已被占用的 Token 被拒绝", sameToken.code !== 0 && sameToken.out.includes("已经给「默认」用了"), sameToken.out);
 
-const added = await sudo(`BOT_TOKEN=${OTHER_TOKEN} TELEGRAM_API_BASE=${otherFake.url} tgbot add ${OTHER_NAME}`);
-check("tgbot add 成功并给出认领链接", added.code === 0 && /start=claim_/.test(added.out), added.out);
+const added = await sudo(`BOT_TOKEN=${OTHER_TOKEN} tgbot add ${OTHER_NAME}`);
+check("tgbot add 成功", added.code === 0 && added.out.includes(OTHER_NAME), added.out);
 check("tgbot add 的输出里没有 Token 明文", !added.out.includes(OTHER_TOKEN));
-check("提示里带上了机器人的名字", added.out.includes(`tgbot ${OTHER_NAME}`), added.out);
-check("新机器人的 .env 权限是 600", execSync(`sudo stat -c %a ${OTHER_DIR}/.env`, { encoding: "utf8" }).trim() === "600");
 check("默认机器人的 Token 没被改", execSync(`sudo grep -c '^BOT_TOKEN=${TOKEN}$' ${DIR}/.env`, { encoding: "utf8" }).trim() === "1");
-
+await sleep(5000);
 const listedBots = await sudo("tgbot list");
-check("tgbot list 显示两个都在运行", listedBots.code === 0 && /默认\t运行中/.test(listedBots.out) && new RegExp(`${OTHER_NAME}\t运行中`).test(listedBots.out), listedBots.out);
-const allVolumes = execSync("sudo docker volume ls --format '{{.Name}}'", { encoding: "utf8" }).split("\n");
-check("两个机器人各有一个数据卷", allVolumes.includes("tg-botsx_data") && allVolumes.includes("tg-botsx-kehu-a_data"), allVolumes.join(","));
+check("tgbot list 显示两个机器人", listedBots.code === 0 && /默认\t/.test(listedBots.out) && new RegExp(`${OTHER_NAME}\t@kehu_a_bot`).test(listedBots.out), listedBots.out);
+check("只有一个容器", execSync("sudo docker ps --format '{{.Names}}'", { encoding: "utf8" }).trim().split("\n").length === 1);
 
-const otherCode = /claim_([\w-]+)/.exec(added.out)?.[1] ?? "";
-otherFake.queue.push({ update_id: 1, message: { message_id: 1, date: 1, chat: { id: 3000, type: "private" }, from: { id: 3000, is_bot: false, first_name: "另一位主人" }, text: `/start claim_${otherCode}` } });
+other.queue.push({ update_id: 1, message: { message_id: 1, date: 1, chat: { id: 5001, type: "private" }, from: { id: 5001, is_bot: false, first_name: "朋友" }, text: "/start" } });
 await sleep(4000);
-check("新机器人由自己的主人认领", otherFake.named("sendMessage").some((m) => m.chat_id === 3000 && String(m.text).includes("绑定成功")), JSON.stringify(otherFake.calls.slice(-3)));
-
-otherFake.queue.push({ update_id: 2, message: { message_id: 2, date: 1, chat: { id: 5001, type: "private" }, from: { id: 5001, is_bot: false, first_name: "乙的访客" }, text: "你好" } });
+check("朋友私聊看到成为管理员按钮", other.named("sendMessage").some((m) => m.chat_id === 5001 && String(m.text).includes("还没有管理员")));
+other.queue.push({ update_id: 2, callback_query: { id: "c", from: { id: 5001, is_bot: false, first_name: "朋友" }, chat_instance: "x", data: "claim", message: { message_id: 9, date: 1, chat: { id: 5001, type: "private" } } } });
 await sleep(4000);
-check("新机器人的访客由新机器人回应", otherFake.named("sendMessage").some((m) => m.chat_id === 5001));
-check("默认机器人没有碰新机器人的访客", !fake.calls.some((call) => call.body.chat_id === 5001));
+check("朋友点一下就绑定", other.named("sendMessage").some((m) => m.chat_id === 5001 && String(m.text).includes("绑定成功")));
+other.queue.push({ update_id: 3, message: { message_id: 3, date: 1, chat: { id: 6001, type: "private" }, from: { id: 6001, is_bot: false, first_name: "乙的访客" }, text: "你好" } });
+await sleep(4000);
+check("默认机器人没有碰新机器人的访客", !fake.calls.some((call) => call.body.chat_id === 6001 || call.body.chat_id === 5001));
 
-// 直接查数据库，确认两边的联系人互相不可见
-async function hasContact(dir: string, userId: number): Promise<boolean> {
-  const script = `import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/relay.db',{readOnly:true});console.log('count='+d.prepare('select count(*) c from contacts where user_id=${userId}').get().c)`;
-  const result = await sudo(`cd ${dir} && docker compose exec -T bot node --disable-warning=ExperimentalWarning --input-type=module -e "${script}"`);
+async function hasContact(file: string, userId: number): Promise<boolean> {
+  const result = await sqlInContainer(`import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('${file}',{readOnly:true});console.log('count='+d.prepare('select count(*) c from contacts where user_id=${userId}').get().c)`);
   if (!/count=\d/.test(result.out)) throw new Error(`查数据库失败：${result.out}`);
   return result.out.includes("count=1");
 }
-check("新机器人的数据库里有自己的访客", await hasContact(OTHER_DIR, 5001));
-check("默认机器人的数据库里没有新机器人的访客", !(await hasContact(DIR, 5001)));
-check("新机器人的数据库里没有默认机器人的访客", !(await hasContact(OTHER_DIR, 2001)));
+const OTHER_DB = `/data/bots/${OTHER_NAME}/relay.db`;
+check("新机器人的数据库里有自己的访客", await hasContact(OTHER_DB, 6001));
+check("默认机器人的数据库里没有新机器人的访客", !(await hasContact("/data/relay.db", 6001)));
+check("新机器人的数据库里没有默认机器人的访客", !(await hasContact(OTHER_DB, 2001)));
 
 const otherBackup = await sudo(`tgbot ${OTHER_NAME} backup`);
-check("按名字备份，文件在它自己的目录", otherBackup.code === 0 && otherBackup.out.includes(`${OTHER_DIR}/backups`), otherBackup.out);
+check("按名字备份，文件名带名字", otherBackup.code === 0 && otherBackup.out.includes(`relay-${OTHER_NAME}-`), otherBackup.out);
 
-const updatedAll = await sudo("tgbot update-all");
-check("tgbot update-all 更新了两个机器人", updatedAll.code === 0 && updatedAll.out.includes("全部更新完了") && updatedAll.out.split("已连上 Telegram").length === 3, updatedAll.out);
-check("更新后两边的 Token 没有混", execSync(`sudo grep -c '^BOT_TOKEN=${OTHER_TOKEN}$' ${OTHER_DIR}/.env`, { encoding: "utf8" }).trim() === "1" && execSync(`sudo grep -c '^BOT_TOKEN=${TOKEN}$' ${DIR}/.env`, { encoding: "utf8" }).trim() === "1");
+// 网页管理：第一次安装给了随机密码，本机能通过 HTTPS 登录
+const passwordLine = /密码：([0-9a-f]+)/.exec(first.out)?.[1] ?? "";
+check("第一次安装给了网页密码", passwordLine !== "", first.out);
+check(".env 里没有网页密码", !execSync(`sudo cat ${DIR}/.env`, { encoding: "utf8" }).includes(passwordLine));
+const webPort = execSync(`sudo sed -n 's/^WEB_PORT=//p' ${DIR}/.env`, { encoding: "utf8" }).trim();
+const webLogin = await sudo(`curl -sk -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -d '{"user":"admin","password":"${passwordLine}"}' https://127.0.0.1:${webPort}/api/login`);
+check("网页能用这个密码登录", webLogin.out.trim() === "200", webLogin.out);
+const webAnon = await sudo(`curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:${webPort}/api/bots`);
+check("网页没登录拿不到列表", webAnon.out.trim() === "401", webAnon.out);
+const webInfo = await sudo("tgbot web");
+check("tgbot web 显示地址", webInfo.code === 0 && webInfo.out.includes(`:${webPort}`), webInfo.out);
+
+const updatedAll = await sudo("tgbot update");
+check("tgbot update 后两个机器人都在", updatedAll.code === 0 && updatedAll.out.includes("已连上 Telegram"), updatedAll.out);
+check("重复安装不再生成网页密码", !updatedAll.out.includes("密码只显示这一次"), updatedAll.out);
+await sleep(5000);
+check("更新后新机器人的数据还在", await hasContact(OTHER_DB, 6001));
 
 const unknownBot = await sudo("tgbot meiyou status");
 check("名字不存在时说清楚", unknownBot.code !== 0 && unknownBot.out.includes("没有叫 meiyou 的机器人"), unknownBot.out);
 
-// 卸载其中一个并删数据，另一个和共用的 tgbot 命令都要留着
-const removedOther = await sudo(`tgbot ${OTHER_NAME} uninstall`, "删除数据\n卸载\n");
-check("按名字卸载成功", removedOther.code === 0 && removedOther.out.includes("数据已删除"), removedOther.out);
-const volumesAfter = execSync("sudo docker volume ls --format '{{.Name}}'", { encoding: "utf8" }).split("\n");
-check("只删了它自己的数据卷", !volumesAfter.includes("tg-botsx-kehu-a_data") && volumesAfter.includes("tg-botsx_data"), volumesAfter.join(","));
-check("还有别的机器人时 tgbot 命令保留", existsSync("/usr/local/bin/tgbot"));
+// 删除其中一个，另一个要留着
+const removedOther = await sudo(`tgbot ${OTHER_NAME} uninstall`, "删除\n");
+check("按名字删除成功", removedOther.code === 0 && removedOther.out.includes(`已删除 ${OTHER_NAME}`), removedOther.out);
+const afterRemoval = await sudo("tgbot list");
+check("只删了它自己", !afterRemoval.out.includes(OTHER_NAME) && afterRemoval.out.includes("默认"), afterRemoval.out);
 const helpBefore = fake.named("sendMessage").filter((m) => String(m.text).includes("怎么回复")).length;
 fake.queue.push({ update_id: 5, message: { message_id: 5, date: 1, chat: { id: 1000, type: "private" }, from: { id: 1000, is_bot: false, first_name: "主人" }, text: "/help" } });
 await sleep(4000);
-check("卸载另一个后默认机器人照常工作", fake.named("sendMessage").filter((m) => String(m.text).includes("怎么回复")).length === helpBefore + 1);
-await otherFake.close();
+check("删除另一个后默认机器人照常工作", fake.named("sendMessage").filter((m) => String(m.text).includes("怎么回复")).length === helpBefore + 1);
 
 // 公开仓库的真实路径：README 里那条 bash <(curl ...)，不用本地源码，从 GitHub 下载
 const repo = process.env.GITHUB_REPOSITORY;

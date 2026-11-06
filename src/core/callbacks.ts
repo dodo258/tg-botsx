@@ -322,7 +322,7 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
     const result = await claimByButton(app, query.from, message.chat.id, arg);
     if (result === "ok") await deleteQuietly(ctx);
     else if (result === "wrong") await edit(ctx, "图案不对，按钮已失效。\n部署的人可以用服务器终端里的链接绑定，或在服务器上运行 tgbot claim 换一个新图案。");
-    else await edit(ctx, "这个按钮已经失效：机器人已有管理员，或超过了 10 分钟。部署的人可以在服务器上运行 tgbot claim 重新生成。");
+    else await edit(ctx, "这个按钮已经失效：机器人已有管理员，或已经过期。找部署的人重新开放。");
     return await answer();
   }
 

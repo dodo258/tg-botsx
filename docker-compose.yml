@@ -4,9 +4,12 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
+    # 网页管理。机器人本身只往外连 Telegram，只有这一个端口对外，有 HTTPS 和登录密钥
+    ports:
+      - "${WEB_PORT:-8443}:8443"
     volumes:
       - data:/data
-    # 机器人只需要往外连 Telegram，不开端口，容器也不给多余权限
+    # 容器不给多余权限
     read_only: true
     tmpfs:
       - /tmp
@@ -14,6 +17,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # 防止异常时把服务器上别的服务挤掉
+    mem_limit: 512m
     logging:
       driver: json-file
       options:
