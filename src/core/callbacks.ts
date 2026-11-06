@@ -331,6 +331,8 @@ async function staffAction(ctx: Ctx, action: string, arg: string, extra: string 
   }
 }
 
+const QUICK_ANSWER_MS = 40;
+
 export async function handleCallback(app: App, query: CallbackQuery): Promise<void> {
   const data = query.data ?? "";
   const message = query.message;
@@ -344,6 +346,9 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
     });
   };
   if (!message) return await answer("这条消息太旧了，操作不了。", true);
+  // Telegram 要等回应才停止转圈。要弹提示的操作都是读完数据库马上回应，几十毫秒内没回应的就是没有提示要说，
+  // 先回应，让按钮立刻停止转圈，改消息这些慢活接着做
+  const quick = setTimeout(() => void answer(), QUICK_ANSWER_MS);
   // 主人私聊里点按钮时机器人发的消息要自动清理。验证题这些给陌生人的不在主人聊天里，不受影响
   const ctx: Ctx = { app: trackedApp(app, message.chat.id), query, chatId: message.chat.id, messageId: message.message_id, answer };
   const [action = "", arg = "", extra] = data.split(":");
@@ -391,9 +396,19 @@ export async function handleCallback(app: App, query: CallbackQuery): Promise<vo
     // 按钮点了没反应最让人困惑：出错要当场说
     app.log("error", `按钮操作 ${action} 失败`, error instanceof Error ? error.message : String(error));
     const blocked = error instanceof TelegramError && error.userUnreachable;
-    await answer(blocked ? "对方已经拉黑了机器人，这一步做不了。" : "这一步没成功，可能是网络问题，请再点一次。", true);
+    const reason = blocked ? "对方已经拉黑了机器人，这一步做不了。" : "这一步没成功，可能是网络问题，请再点一次。";
+    clearTimeout(quick);
+    // 已经回应过就弹不了提示了，发条消息说，不能让人以为成功了
+    if (answered) {
+      await app.tg.call("sendMessage", { chat_id: message.chat.id, ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }), text: reason }).catch((failure: unknown) => {
+        app.log("warn", "发送出错提示失败", failure instanceof Error ? failure.message : String(failure));
+      });
+    } else {
+      await answer(reason, true);
+    }
     return;
   }
+  clearTimeout(quick);
   await answer();
 }
 

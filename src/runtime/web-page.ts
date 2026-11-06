@@ -32,6 +32,10 @@ h1,h2,h3,h4,p{margin:0}
 .btn.bare:hover{color:var(--ink);background:var(--hover);filter:none}
 .btn.danger{background:none;box-shadow:inset 0 0 0 1px currentColor;color:var(--bad)}
 .btn[disabled]{opacity:.45;cursor:default;filter:none;transform:none}
+.btn.busy{opacity:.75;position:relative;color:transparent}
+.btn.busy::after{content:"";position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid var(--muted);border-top-color:transparent;animation:spin .7s linear infinite}
+.btn.primary.busy::after{border-color:var(--on-primary);border-top-color:transparent}
+@keyframes spin{to{transform:rotate(360deg)}}
 :focus-visible{outline:2px solid var(--twine);outline-offset:2px}
 input[type=text],input[type=password],input[type=search],textarea{width:100%;min-height:42px;padding:9px 12px;background:var(--well);border:1px solid var(--edge);border-radius:var(--r-m);box-shadow:var(--well-shadow);transition:border-color .15s,box-shadow .15s}
 input::placeholder,textarea::placeholder{color:var(--faint)}
@@ -131,7 +135,9 @@ dialog.sheet::backdrop{background:rgba(20,32,42,.22);animation:fade .2s}
 .days{display:flex;gap:6px}
 .days button{appearance:none;flex:1;min-height:36px;border:0;border-radius:var(--r-s);background:var(--well);box-shadow:var(--well-shadow);color:var(--muted);cursor:pointer}
 .days button[aria-pressed=true]{background:var(--primary);box-shadow:var(--primary-shadow);color:var(--on-primary);font-weight:600}
-.times{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.times{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.tm{display:flex;align-items:center;gap:4px}.tm input{flex:1;min-width:0}
+.rm{appearance:none;flex:none;width:30px;height:30px;border:0;border-radius:var(--r-s);background:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer}.rm:hover{background:var(--hover);color:var(--ink)}
 select,input[type=date],input[type=time]{width:100%;min-height:42px;padding:9px 12px;background:var(--well);border:1px solid var(--edge);border-radius:var(--r-m);box-shadow:var(--well-shadow)}
 .switch{display:flex;align-items:center;gap:12px;margin-top:20px;cursor:pointer;font-weight:500;font-size:13.5px}
 .switch span{flex:1}
@@ -180,7 +186,16 @@ const CHEV='<svg class="chev" viewBox="0 0 14 14" fill="none" aria-hidden="true"
 document.body.insertAdjacentHTML('afterbegin',DEFS);
 const app=document.getElementById('app');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// 网络来回要零点几秒，按钮要马上有反应。点过的按钮在请求期间显示处理中，防止连点
+let lastBtn=null;
+document.addEventListener('click',ev=>{lastBtn=ev.target.closest?.('button')||null},true);
+document.addEventListener('submit',ev=>{lastBtn=ev.submitter||ev.target.querySelector('.primary')||lastBtn},true);
 async function call(path,method='GET',body){
+  const btn=method==='GET'?null:lastBtn;
+  if(btn){btn.classList.add('busy');btn.disabled=true}
+  try{return await request(path,method,body)}finally{if(btn){btn.classList.remove('busy');btn.disabled=false}}
+}
+async function request(path,method,body){
   const res=await fetch(path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined,credentials:'same-origin'});
   const data=await res.json().catch(()=>({error:'服务器没有正常响应，刷新页面再试。'}));
   if(res.status===401&&path!=='/api/login'&&path!=='/api/password'){showLogin();throw new Error('请先登录。')}
@@ -269,13 +284,13 @@ function ok(d,t){d.querySelector('.err').hidden=true;const n=d.querySelector('.n
 
 function showAdd(){
   const d=sheet(headOf('添加机器人','在 Telegram 的 @BotFather 发 /newbot 新建，把 Token 粘贴到这里。')+'<form><label for="t">Token</label><textarea id="t" placeholder="123456:ABC-DEF…" required autofocus></textarea><p class="hint">可以一次粘贴多个，一行一个。</p><label for="w">指定谁来用（选填）</label><input id="w" type="text" placeholder="@zhangsan" autocomplete="off"><p class="hint">填了，他私聊机器人就直接能用，不用点按钮，别人也抢不走。不填，谁先点「成为管理员」就归谁。一次粘贴多个时这项不生效。</p><p class="err" hidden></p><ul class="results" hidden></ul><div class="acts"><button class="btn primary" id="go">添加</button></div></form>');
-  d.querySelector('form').onsubmit=async ev=>{ev.preventDefault();const go=d.querySelector('#go');go.disabled=true;d.querySelector('.err').hidden=true;
+  d.querySelector('form').onsubmit=async ev=>{ev.preventDefault();d.querySelector('.err').hidden=true;
     try{const r=await call('/api/bots','POST',{tokens:d.querySelector('#t').value,user:d.querySelector('#w').value});
       const list=d.querySelector('.results');list.hidden=false;
       list.innerHTML=r.results.map(x=>x.ok?'<li><span>已添加 <strong>@'+esc(x.username)+'</strong></span><button type="button" class="btn" data-c="@'+esc(x.username)+'">复制用户名</button></li>':'<li class="no"><span>'+esc(x.hint)+' 没加上：'+esc(x.error)+'</span></li>').join('');
       list.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>copy(b.dataset.c,'已复制，发给朋友就行。'));
       if(r.results.every(x=>x.ok))d.querySelector('#t').value='';refresh();
-    }catch(err){fail(d,err)}finally{go.disabled=false}};
+    }catch(err){fail(d,err)}};
 }
 
 function showManage(b){
@@ -286,7 +301,7 @@ function showManage(b){
    '<div class="tabs" role="tablist"><button role="tab" data-t="owner" aria-selected="true">管理员</button><button role="tab" data-t="set" aria-selected="false">设置</button><button role="tab" data-t="sch" aria-selected="false">定时发送</button><button role="tab" data-t="more" aria-selected="false">更多</button></div>'+
    '<div data-p="owner"><div class="owner" id="cur"></div><form id="a"><label for="w">'+(b.bound?'换一个人':'指定谁来用')+'</label><input id="w" type="text" placeholder="@zhangsan" autocomplete="off"><p class="hint" id="wh"></p><div class="acts"><button class="btn primary" id="assign"></button></div></form><div id="lb"></div></div>'+
    '<div data-p="set" hidden><form id="s"><label for="welcome">第一次的自动回复</label><p class="hint" style="margin:0 0 8px">陌生人第一次私信机器人时发一次。可以带一张图片。</p><textarea id="welcome" placeholder="读取中…"></textarea><div class="pick"><img id="pv" alt="自动回复的图片" hidden><span id="pn" class="hint" hidden>已设置图片</span><div class="acts" style="margin-top:0"><button type="button" class="btn" id="pa">添加图片</button><button type="button" class="btn bare" id="pr" hidden>去掉图片</button></div><input id="pf" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><label class="switch"><span>人机验证<small>第一次发消息要答一道 10 以内的加减题</small></span><input id="v" type="checkbox" role="switch"></label><label for="uic">菜单消息自动清理</label><select id="uic"><option value="1">1 小时后</option><option value="6">6 小时后</option><option value="24">24 小时后</option><option value="0">不清理</option></select><p class="hint">面板、提示、点过的命令到时间自动删掉。别人的私信和你的回复不会动。</p><div class="acts"><button class="btn primary">保存设置</button></div></form></div>'+
-   '<div data-p="sch" hidden><p class="hint" id="schr" style="margin-top:16px"></p><ul class="sch" id="schl"></ul><form id="sf" class="section" style="margin-top:20px"><h4>添加定时发送</h4><label for="st">内容</label><textarea id="st" placeholder="要发的文字"></textarea><div class="pick"><img id="spv" alt="要发的图片" hidden><div class="acts" style="margin-top:0"><button type="button" class="btn" id="spa">添加图片</button><button type="button" class="btn bare" id="spr" hidden>去掉图片</button></div><input id="spf" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><label>多久发一次</label><div class="seg" id="srp"><button type="button" class="tab" data-r="once" aria-pressed="true">只发一次</button><button type="button" class="tab" data-r="daily" aria-pressed="false">每天</button><button type="button" class="tab" data-r="weekly" aria-pressed="false">每周</button></div><div id="swk" hidden><label>每周哪几天</label><div class="days" id="sdays"><button type="button" data-w="1" aria-pressed="false">一</button><button type="button" data-w="2" aria-pressed="false">二</button><button type="button" data-w="3" aria-pressed="false">三</button><button type="button" data-w="4" aria-pressed="false">四</button><button type="button" data-w="5" aria-pressed="false">五</button><button type="button" data-w="6" aria-pressed="false">六</button><button type="button" data-w="0" aria-pressed="false">日</button></div></div><div id="sdw"><label for="sd">日期</label><input id="sd" type="date"></div><label>时间</label><div id="stms" class="times"><input type="time" value="09:00" required aria-label="时间"></div><button type="button" class="btn bare" id="stadd" hidden style="margin-top:6px">再加一个时间</button><div class="acts"><button class="btn primary">添加</button></div></form></div>'+
+   '<div data-p="sch" hidden><p class="hint" id="schr" style="margin-top:16px"></p><ul class="sch" id="schl"></ul><form id="sf" class="section" style="margin-top:20px"><h4>添加定时发送</h4><label for="st">内容</label><textarea id="st" placeholder="要发的文字"></textarea><div class="pick"><img id="spv" alt="要发的图片" hidden><div class="acts" style="margin-top:0"><button type="button" class="btn" id="spa">添加图片</button><button type="button" class="btn bare" id="spr" hidden>去掉图片</button></div><input id="spf" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><label>多久发一次</label><div class="seg" id="srp"><button type="button" class="tab" data-r="once" aria-pressed="true">只发一次</button><button type="button" class="tab" data-r="daily" aria-pressed="false">每天</button><button type="button" class="tab" data-r="weekly" aria-pressed="false">每周</button></div><div id="swk" hidden><label>每周哪几天</label><div class="days" id="sdays"><button type="button" data-w="1" aria-pressed="false">一</button><button type="button" data-w="2" aria-pressed="false">二</button><button type="button" data-w="3" aria-pressed="false">三</button><button type="button" data-w="4" aria-pressed="false">四</button><button type="button" data-w="5" aria-pressed="false">五</button><button type="button" data-w="6" aria-pressed="false">六</button><button type="button" data-w="0" aria-pressed="false">日</button></div></div><div id="sdw"><label for="sd">日期</label><input id="sd" type="date"></div><label>时间</label><div id="stms" class="times"><div class="tm"><input type="time" value="09:00" required aria-label="时间"></div></div><button type="button" class="btn bare" id="stadd" hidden style="margin-top:6px">再加一个时间</button><div class="acts"><button class="btn primary">添加</button></div></form></div>'+
    '<div data-p="more" hidden>'+(b.canDelete?'<form id="k" class="section" style="margin-top:18px"><h4>换 Token</h4><p class="hint">在 @BotFather 重置过 Token，或者这个机器人连不上时用。</p><input id="tk" type="password" placeholder="新的 Token" autocomplete="off" style="margin-top:10px"><div class="acts"><button class="btn">换 Token</button></div></form><div class="section"><h4>删除机器人</h4><p class="hint">它的聊天记录会一起删掉，不能恢复。要删的话，输入 <strong>'+esc(b.name)+'</strong> 确认。</p><input id="dn" type="text" autocomplete="off" style="margin-top:10px"><div class="acts"><button type="button" class="btn danger" id="del" disabled>删除机器人</button></div></div>':'<p class="hint" style="margin-top:18px">这是安装时的默认机器人，它的 Token 和卸载都在服务器上用 tgbot 命令操作。</p>')+'</div>'+
    '<p class="err" hidden></p><p class="note" hidden></p>');
   const paint=()=>{
@@ -316,14 +331,14 @@ function showManage(b){
     l.querySelectorAll('[data-sd]').forEach(b=>{let sure=false;b.onclick=async()=>{if(!sure){sure=true;b.textContent='再点一次确认';return}try{await call(path+'/schedules/'+b.dataset.sd,'DELETE');await paintSch()}catch(e){fail(d,e)}}});
   };
   d.querySelector('[data-t=sch]').addEventListener('click',()=>{paintSch().catch(e=>fail(d,e))});
-  d.querySelectorAll('[data-r]').forEach(b=>b.onclick=()=>{schRepeat=b.dataset.r;d.querySelectorAll('[data-r]').forEach(x=>x.setAttribute('aria-pressed',x===b));d.querySelector('#sdw').hidden=schRepeat!=='once';d.querySelector('#swk').hidden=schRepeat!=='weekly';d.querySelector('#stadd').hidden=schRepeat==='once';if(schRepeat==='once')d.querySelectorAll('#stms input').forEach((x,i)=>{if(i)x.remove()})});
+  d.querySelectorAll('[data-r]').forEach(b=>b.onclick=()=>{schRepeat=b.dataset.r;d.querySelectorAll('[data-r]').forEach(x=>x.setAttribute('aria-pressed',x===b));d.querySelector('#sdw').hidden=schRepeat!=='once';d.querySelector('#swk').hidden=schRepeat!=='weekly';d.querySelector('#stadd').hidden=schRepeat==='once';if(schRepeat==='once')d.querySelectorAll('#stms .tm').forEach((x,i)=>{if(i)x.remove()})});
   d.querySelectorAll('[data-w]').forEach(b=>b.onclick=()=>b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')!=='true'));
-  d.querySelector('#stadd').onclick=()=>{const i=document.createElement('input');i.type='time';i.required=true;i.setAttribute('aria-label','时间');d.querySelector('#stms').append(i);i.focus()};
+  d.querySelector('#stadd').onclick=()=>{const w=document.createElement('div');w.className='tm';w.innerHTML='<input type="time" aria-label="时间"><button type="button" class="rm" aria-label="去掉这个时间">×</button>';w.querySelector('.rm').onclick=()=>w.remove();d.querySelector('#stms').append(w);w.querySelector('input').focus()};
   const spv=d.querySelector('#spv'),spf=d.querySelector('#spf'),spr=d.querySelector('#spr'),spa=d.querySelector('#spa');
   const showSch=()=>{spv.hidden=!schImage;if(schImage)spv.src=schImage;spr.hidden=!schImage;spa.textContent=schImage?'换一张':'添加图片'};
   spa.onclick=()=>spf.click();spr.onclick=()=>{schImage='';spf.value='';showSch()};
   spf.onchange=()=>{const f=spf.files[0];if(!f)return;if(f.size>5242880){fail(d,new Error('图片太大了，请控制在 5 MB 以内。'));spf.value='';return}const r=new FileReader();r.onload=()=>{schImage=r.result;showSch()};r.readAsDataURL(f)};
-  d.querySelector('#sf').onsubmit=async ev=>{ev.preventDefault();try{const c=await call(path+'/schedules','POST',{text:d.querySelector('#st').value,repeat:schRepeat,date:d.querySelector('#sd').value,weekdays:[...d.querySelectorAll('[data-w][aria-pressed=true]')].map(x=>Number(x.dataset.w)),times:[...d.querySelectorAll('#stms input')].map(x=>x.value),time:d.querySelector('#stms input').value,...(schImage?{image:schImage}:{})});d.querySelector('#st').value='';schImage='';spf.value='';showSch();await paintSch();ok(d,'已设好：'+c.when+'，'+c.state+'。')}catch(e){fail(d,e)}};
+  d.querySelector('#sf').onsubmit=async ev=>{ev.preventDefault();try{const c=await call(path+'/schedules','POST',{text:d.querySelector('#st').value,repeat:schRepeat,date:d.querySelector('#sd').value,weekdays:[...d.querySelectorAll('[data-w][aria-pressed=true]')].map(x=>Number(x.dataset.w)),times:[...d.querySelectorAll('#stms input')].map(x=>x.value).filter(Boolean),time:d.querySelector('#stms input').value,...(schImage?{image:schImage}:{})});d.querySelector('#st').value='';schImage='';spf.value='';showSch();ok(d,'已设好：'+c.when+'，'+c.state+'。');paintSch().catch(e=>fail(d,e))}catch(e){fail(d,e)}};
   let armed=false;
   d.querySelector('#a').onsubmit=async ev=>{ev.preventDefault();const w=d.querySelector('#w').value.trim(),btn=d.querySelector('#assign');
     if(b.bound&&!armed){armed=true;btn.textContent='再点一次确认：清除现在的管理员';return}

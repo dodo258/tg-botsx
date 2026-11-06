@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ALICE, BOB, GROUP, makeHarness, OWNER } from "./harness.ts";
 import type { Harness } from "./harness.ts";
 import { num } from "../src/core/db.ts";
+import { TelegramError } from "../src/core/telegram.ts";
 import { handleUpdate } from "../src/core/router.ts";
 import { broadcastTick, retryFailed, tick } from "../src/core/maintenance.ts";
 import { activateSchedule, createDraft, deleteSchedule, getSchedule, nextRun, parseOnce, parseTimes, scheduleState, scheduleTick, toggleSchedule } from "../src/core/schedule.ts";
@@ -2188,6 +2189,48 @@ describe("自动清理的入口", () => {
     await h.press(OWNER, OWNER, 1, "mc:uiClean:0");
     await h.press(OWNER, OWNER, 1, "m:main");
     expect(JSON.stringify(h.tg.last("editMessageText").reply_markup)).toContain("自动清理：关");
+  });
+});
+
+describe("按钮要马上有反应", () => {
+  it("改消息很慢时，也先回应让按钮停止转圈", async () => {
+    h = await makeHarness({ verify: false });
+    const realCall = h.tg.call.bind(h.tg);
+    const order: string[] = [];
+    h.tg.call = (async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "editMessageText") await new Promise((done) => setTimeout(done, 200));
+      order.push(method);
+      return await realCall(method, params);
+    }) as never;
+    await h.press(OWNER, OWNER, 1, "p:main");
+    expect(order.indexOf("answerCallbackQuery")).toBeLessThan(order.indexOf("editMessageText"));
+    expect(order.filter((method) => method === "answerCallbackQuery")).toHaveLength(1);
+  });
+
+  it("要弹提示的操作，提示还在", async () => {
+    h = await makeHarness({ verify: false });
+    await h.set("deskMode", "group");
+    await h.set("groupId", GROUP);
+    await h.press(7777, GROUP, 1, "ex");
+    expect(h.tg.last("answerCallbackQuery").text).toContain("只有主人");
+  });
+
+  it("已经回应过再出错：发消息说明，不让人以为成功了", async () => {
+    h = await makeHarness({ verify: false });
+    await h.fromUser(ALICE, "a");
+    await h.press(OWNER, OWNER, 1, `select:${ALICE}`);
+    await h.fromOwner("发出去的");
+    const id = num((await row("SELECT id FROM messages WHERE direction = 'out'")).id);
+    const realCall = h.tg.call.bind(h.tg);
+    h.tg.call = (async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "deleteMessage") {
+        await new Promise((done) => setTimeout(done, 200));
+        throw new TelegramError(method, 403, "Forbidden: bot was blocked by the user", null);
+      }
+      return await realCall(method, params);
+    }) as never;
+    await h.press(OWNER, OWNER, 9, `undo!:${id}`);
+    expect(h.tg.textsTo(OWNER).at(-1)).toContain("拉黑");
   });
 });
 
